@@ -18,6 +18,7 @@ package core
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"embed"
 	"encoding/binary"
 	"encoding/json"
@@ -26,8 +27,8 @@ import (
 	"sync"
 
 	"github.com/c2h5oh/datasize"
+	"github.com/ethereum-optimism/superchain-registry/superchain"
 	"github.com/holiman/uint256"
-	"github.com/ledgerwatch/log/v3"
 	"golang.org/x/exp/slices"
 
 	"github.com/ledgerwatch/erigon-lib/chain"
@@ -49,6 +50,7 @@ import (
 	"github.com/ledgerwatch/erigon/params"
 	"github.com/ledgerwatch/erigon/params/networkname"
 	"github.com/ledgerwatch/erigon/turbo/trie"
+	"github.com/ledgerwatch/log/v3"
 )
 
 // CommitGenesisBlock writes or updates the genesis block in db.
@@ -65,16 +67,16 @@ import (
 //
 // The returned chain configuration is never nil.
 func CommitGenesisBlock(db kv.RwDB, genesis *types.Genesis, tmpDir string, logger log.Logger) (*chain.Config, *types.Block, error) {
-	return CommitGenesisBlockWithOverride(db, genesis, nil, nil, tmpDir, logger)
+	return CommitGenesisBlockWithOverride(db, genesis, nil, nil, nil, tmpDir, logger)
 }
 
-func CommitGenesisBlockWithOverride(db kv.RwDB, genesis *types.Genesis, overrideShanghaiTime, overrideOptimismCanyonTime *big.Int, tmpDir string, logger log.Logger) (*chain.Config, *types.Block, error) {
+func CommitGenesisBlockWithOverride(db kv.RwDB, genesis *types.Genesis, overrideCancunTime, overrideShanghaiTime, overrideOptimismCanyonTime *big.Int, tmpDir string, logger log.Logger) (*chain.Config, *types.Block, error) {
 	tx, err := db.BeginRw(context.Background())
 	if err != nil {
 		return nil, nil, err
 	}
 	defer tx.Rollback()
-	c, b, err := WriteGenesisBlock(tx, genesis, overrideShanghaiTime, overrideOptimismCanyonTime, tmpDir, logger)
+	c, b, err := WriteGenesisBlock(tx, genesis, overrideCancunTime, overrideShanghaiTime, overrideOptimismCanyonTime, tmpDir, logger)
 	if err != nil {
 		return c, b, err
 	}
@@ -85,7 +87,7 @@ func CommitGenesisBlockWithOverride(db kv.RwDB, genesis *types.Genesis, override
 	return c, b, nil
 }
 
-func WriteGenesisBlock(tx kv.RwTx, genesis *types.Genesis, overrideShanghaiTime, overrideOptimismCanyonTime *big.Int, tmpDir string, logger log.Logger) (*chain.Config, *types.Block, error) {
+func WriteGenesisBlock(tx kv.RwTx, genesis *types.Genesis, overrideCancunTime, overrideShanghaiTime, overrideOptimismCanyonTime *big.Int, tmpDir string, logger log.Logger) (*chain.Config, *types.Block, error) {
 	var storedBlock *types.Block
 	if genesis != nil && genesis.Config == nil {
 		return params.AllProtocolChanges, nil, types.ErrGenesisNoConfig
@@ -97,8 +99,8 @@ func WriteGenesisBlock(tx kv.RwTx, genesis *types.Genesis, overrideShanghaiTime,
 	}
 
 	applyOverrides := func(config *chain.Config) {
-		if overrideShanghaiTime != nil {
-			config.ShanghaiTime = overrideShanghaiTime
+		if overrideCancunTime != nil {
+			config.CancunTime = overrideCancunTime
 		}
 		if config.IsOptimism() && overrideOptimismCanyonTime != nil {
 			config.CanyonTime = overrideOptimismCanyonTime
@@ -113,18 +115,6 @@ func WriteGenesisBlock(tx kv.RwTx, genesis *types.Genesis, overrideShanghaiTime,
 			if overrideShanghaiTime.Cmp(overrideOptimismCanyonTime) != 0 {
 				logger.Warn("Shanghai hardfork time is overridden by optimism canyon time",
 					"shanghai", overrideShanghaiTime.String(), "canyon", overrideOptimismCanyonTime.String())
-			}
-		}
-		if config.IsOptimism() && config.ChainID != nil {
-			if config.ChainID.Cmp(params.OptimismGoerliChainConfig.ChainID) == 0 {
-				config.RegolithTime = params.OptimismGoerliChainConfig.RegolithTime
-				if overrideOptimismCanyonTime == nil {
-					// fall back to default hardfork time
-					config.ShanghaiTime = params.OptimismGoerliChainConfig.ShanghaiTime
-					config.CanyonTime = params.OptimismGoerliChainConfig.CanyonTime
-				}
-			} else if config.ChainID.Cmp(params.OptimismMainnetChainConfig.ChainID) == 0 {
-				config.RegolithTime = params.OptimismMainnetChainConfig.RegolithTime
 			}
 		}
 	}
@@ -196,8 +186,8 @@ func WriteGenesisBlock(tx kv.RwTx, genesis *types.Genesis, overrideShanghaiTime,
 	// If london block number is set to previous wrong chainspec, overwrite with correct chainspec.
 	// Following code will be removed after we are confident that previous dbs are all corrected.
 	// https://github.com/testinprod-io/op-erigon/issues/71
-	if storedCfg.ChainName == networkname.OptimismMainnetChainName &&
-		newCfg.ChainName == networkname.OptimismMainnetChainName &&
+	if storedCfg.ChainName == networkname.OPMainnetChainName &&
+		newCfg.ChainName == networkname.OPMainnetChainName &&
 		storedCfg.LondonBlock.Uint64() == 3950000 &&
 		newCfg.LondonBlock.Uint64() == 105235063 {
 		log.Warn("Override chainconfig for Optimism Mainnet chainspec correction")
@@ -385,6 +375,18 @@ func MainnetGenesisBlock() *types.Genesis {
 	}
 }
 
+// HoleskyGenesisBlock returns the Holesky main net genesis block.
+func HoleskyGenesisBlock() *types.Genesis {
+	return &types.Genesis{
+		Config:     params.HoleskyChainConfig,
+		Nonce:      4660,
+		GasLimit:   25000000,
+		Difficulty: big.NewInt(1),
+		Timestamp:  1695902100,
+		Alloc:      readPrealloc("allocs/holesky.json"),
+	}
+}
+
 // SepoliaGenesisBlock returns the Sepolia network genesis block.
 func SepoliaGenesisBlock() *types.Genesis {
 	return &types.Genesis{
@@ -450,32 +452,10 @@ func BorDevnetGenesisBlock() *types.Genesis {
 	}
 }
 
-func OptimismMainnetGenesisBlock() *types.Genesis {
-	return &types.Genesis{
-		Config:     params.OptimismMainnetChainConfig,
-		Difficulty: big.NewInt(1),
-		Mixhash:    libcommon.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000000"),
-		ExtraData:  hexutil.MustDecode("0x000000000000000000000000000000000000000000000000000000000000000000000398232e2064f896018496b4b44b3d62751f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"),
-		GasLimit:   15000000,
-		Alloc:      readPrealloc("allocs/optimism_mainnet.json"),
-	}
-}
-
-func OptimismGoerliGenesisBlock() *types.Genesis {
-	return &types.Genesis{
-		Config:     params.OptimismGoerliChainConfig,
-		Difficulty: big.NewInt(1),
-		Mixhash:    libcommon.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000000"),
-		ExtraData:  hexutil.MustDecode("0x000000000000000000000000000000000000000000000000000000000000000027770a9694e4b4b1e130ab91bc327c36855f612e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"),
-		GasLimit:   15000000,
-		Alloc:      readPrealloc("allocs/optimism_goerli.json"),
-	}
-}
-
 func OptimismDevnetGenesisBlock() *types.Genesis {
 	// copy of optimism goerli spec
 	return &types.Genesis{
-		Config:     params.OptimismDevnetChainConfig,
+		Config:     params.OPDevnetChainConfig,
 		Difficulty: big.NewInt(0),
 		Mixhash:    libcommon.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000000"),
 		ExtraData:  hexutil.MustDecode("0x424544524f434b"), // BEDROCK
@@ -514,6 +494,13 @@ func ChiadoGenesisBlock() *types.Genesis {
 var DevnetSignPrivateKey, _ = crypto.HexToECDSA("26e86e45f6fc45ec6e2ecd128cec80fa1d1505e5507dcd2ae58c3130a7a97b48")
 var DevnetEtherbase = libcommon.HexToAddress("67b1d87101671b127f5f8714789c7192f7ad340e")
 
+// DevnetSignKey is defined like this to allow the devnet process to pre-allocate keys
+// for nodes and then pass the address via --miner.etherbase - the function will be called
+// to retieve the mining key
+var DevnetSignKey = func(address libcommon.Address) *ecdsa.PrivateKey {
+	return DevnetSignPrivateKey
+}
+
 // DeveloperGenesisBlock returns the 'geth --dev' genesis block.
 func DeveloperGenesisBlock(period uint64, faucet libcommon.Address) *types.Genesis {
 	// Override the default period to the user requested one
@@ -547,8 +534,8 @@ func GenesisToBlock(g *types.Genesis, tmpDir string) (*types.Block, *state.Intra
 		MixDigest:     g.Mixhash,
 		Coinbase:      g.Coinbase,
 		BaseFee:       g.BaseFee,
-		DataGasUsed:   g.DataGasUsed,
-		ExcessDataGas: g.ExcessDataGas,
+		BlobGasUsed:   g.BlobGasUsed,
+		ExcessBlobGas: g.ExcessBlobGas,
 		AuRaStep:      g.AuRaStep,
 		AuRaSeal:      g.AuRaSeal,
 	}
@@ -558,7 +545,7 @@ func GenesisToBlock(g *types.Genesis, tmpDir string) (*types.Block, *state.Intra
 	if g.Difficulty == nil {
 		head.Difficulty = params.GenesisDifficulty
 	}
-	if g.Config != nil && (g.Config.IsLondon(0)) {
+	if g.Config != nil && g.Config.IsLondon(0) {
 		if g.BaseFee != nil {
 			head.BaseFee = g.BaseFee
 		} else {
@@ -567,8 +554,26 @@ func GenesisToBlock(g *types.Genesis, tmpDir string) (*types.Block, *state.Intra
 	}
 
 	var withdrawals []*types.Withdrawal
-	if g.Config != nil && (g.Config.IsShanghai(g.Timestamp)) {
+	if g.Config != nil && g.Config.IsShanghai(g.Timestamp) {
 		withdrawals = []*types.Withdrawal{}
+	}
+
+	if g.Config != nil && g.Config.IsCancun(g.Timestamp) {
+		if g.BlobGasUsed != nil {
+			head.BlobGasUsed = g.BlobGasUsed
+		} else {
+			head.BlobGasUsed = new(uint64)
+		}
+		if g.ExcessBlobGas != nil {
+			head.ExcessBlobGas = g.ExcessBlobGas
+		} else {
+			head.ExcessBlobGas = new(uint64)
+		}
+		if g.ParentBeaconBlockRoot != nil {
+			head.ParentBeaconBlockRoot = g.ParentBeaconBlockRoot
+		} else {
+			head.ParentBeaconBlockRoot = &libcommon.Hash{}
+		}
 	}
 
 	var root libcommon.Hash
@@ -643,6 +648,13 @@ func GenesisToBlock(g *types.Genesis, tmpDir string) (*types.Block, *state.Intra
 		return nil, nil, err
 	}
 
+	if g.StateHash != nil {
+		if len(g.Alloc) > 0 {
+			panic(fmt.Errorf("cannot both have genesis hash %s "+
+				"and non-empty state-allocation", *g.StateHash))
+		}
+		root = *g.StateHash
+	}
 	head.Root = root
 
 	return types.NewBlock(head, nil, nil, nil, withdrawals), statedb, nil
@@ -678,9 +690,18 @@ func readPrealloc(filename string) types.GenesisAlloc {
 }
 
 func GenesisBlockByChainName(chain string) *types.Genesis {
+	genesis, err := loadOPStackGenesisByChainName(chain)
+	if err != nil {
+		panic(err)
+	}
+	if genesis != nil {
+		return genesis
+	}
 	switch chain {
 	case networkname.MainnetChainName:
 		return MainnetGenesisBlock()
+	case networkname.HoleskyChainName:
+		return HoleskyGenesisBlock()
 	case networkname.SepoliaChainName:
 		return SepoliaGenesisBlock()
 	case networkname.GoerliChainName:
@@ -691,11 +712,7 @@ func GenesisBlockByChainName(chain string) *types.Genesis {
 		return BorMainnetGenesisBlock()
 	case networkname.BorDevnetChainName:
 		return BorDevnetGenesisBlock()
-	case networkname.OptimismMainnetChainName:
-		return OptimismMainnetGenesisBlock()
-	case networkname.OptimismGoerliChainName:
-		return OptimismGoerliGenesisBlock()
-	case networkname.OptimismDevnetChainName:
+	case networkname.OPDevnetChainName:
 		return OptimismDevnetGenesisBlock()
 	case networkname.GnosisChainName:
 		return GnosisGenesisBlock()
@@ -704,4 +721,97 @@ func GenesisBlockByChainName(chain string) *types.Genesis {
 	default:
 		return nil
 	}
+}
+
+// loadOPStackGenesisByChainName loads genesis block corresponding to the chain name from superchain regsitry.
+// This implementation is based on op-geth(https://github.com/ethereum-optimism/op-geth/blob/c7871bc4454ffc924eb128fa492975b30c9c46ad/core/superchain.go#L13)
+func loadOPStackGenesisByChainName(name string) (*types.Genesis, error) {
+	opStackChainCfg := params.OPStackChainConfigByName(name)
+	if opStackChainCfg == nil {
+		return nil, nil
+	}
+
+	cfg := params.LoadSuperChainConfig(opStackChainCfg)
+	if cfg == nil {
+		return nil, nil
+	}
+
+	gen, err := superchain.LoadGenesis(opStackChainCfg.ChainID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load genesis definition for chain %d: %w", opStackChainCfg.ChainID, err)
+	}
+
+	genesis := &types.Genesis{
+		Config:     cfg,
+		Nonce:      gen.Nonce,
+		Timestamp:  gen.Timestamp,
+		ExtraData:  gen.ExtraData,
+		GasLimit:   gen.GasLimit,
+		Difficulty: (*big.Int)(gen.Difficulty),
+		Mixhash:    libcommon.Hash(gen.Mixhash),
+		Coinbase:   libcommon.Address(gen.Coinbase),
+		Alloc:      make(types.GenesisAlloc),
+		Number:     gen.Number,
+		GasUsed:    gen.GasUsed,
+		ParentHash: libcommon.Hash(gen.ParentHash),
+		BaseFee:    (*big.Int)(gen.BaseFee),
+	}
+
+	for addr, acc := range gen.Alloc {
+		var code []byte
+		if acc.CodeHash != ([32]byte{}) {
+			dat, err := superchain.LoadContractBytecode(acc.CodeHash)
+			if err != nil {
+				return nil, fmt.Errorf("failed to load bytecode %s of address %s in chain %d: %w", acc.CodeHash, addr, opStackChainCfg.ChainID, err)
+			}
+			code = dat
+		}
+		var storage map[libcommon.Hash]libcommon.Hash
+		if len(acc.Storage) > 0 {
+			storage = make(map[libcommon.Hash]libcommon.Hash)
+			for k, v := range acc.Storage {
+				storage[libcommon.Hash(k)] = libcommon.Hash(v)
+			}
+		}
+		bal := libcommon.Big0
+		if acc.Balance != nil {
+			bal = (*big.Int)(acc.Balance)
+		}
+		genesis.Alloc[libcommon.Address(addr)] = types.GenesisAccount{
+			Code:    code,
+			Storage: storage,
+			Balance: bal,
+			Nonce:   acc.Nonce,
+		}
+	}
+	if gen.StateHash != nil {
+		if len(gen.Alloc) > 0 {
+			return nil, fmt.Errorf("chain definition unexpectedly contains both allocation (%d) and state-hash %s", len(gen.Alloc), *gen.StateHash)
+		}
+		genesis.StateHash = (*libcommon.Hash)(gen.StateHash)
+	}
+
+	genesisBlock, _, err := GenesisToBlock(genesis, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to build genesis block: %w", err)
+	}
+	genesisBlockHash := genesisBlock.Hash()
+	expectedHash := libcommon.Hash([32]byte(opStackChainCfg.Genesis.L2.Hash))
+
+	// Verify we correctly produced the genesis config by recomputing the genesis-block-hash,
+	// and check the genesis matches the chain genesis definition.
+	if opStackChainCfg.Genesis.L2.Number != genesisBlock.NumberU64() {
+		switch opStackChainCfg.ChainID {
+		case params.OPMainnetChainID:
+			expectedHash = params.OPMainnetGenesisHash
+		case params.OPGoerliChainID:
+			expectedHash = params.OPGoerliGenesisHash
+		default:
+			return nil, fmt.Errorf("unknown stateless genesis definition for chain %d", opStackChainCfg.ChainID)
+		}
+	}
+	if expectedHash != genesisBlockHash {
+		return nil, fmt.Errorf("produced genesis with hash %s but expected %s", genesisBlockHash, expectedHash)
+	}
+	return genesis, nil
 }
