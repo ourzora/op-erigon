@@ -275,4 +275,4 @@ require (
 
 replace github.com/tendermint/tendermint => github.com/bnb-chain/tendermint v0.31.12
 
-replace github.com/VictoriaMetrics/metrics => github.com/ourzora/erigon-metrics v0.0.0-20230808214014-887c5bbc7969
+replace github.com/VictoriaMetrics/metrics => github.com/ourzora/erigon-metrics v0.0.0-20240116171904-0f60d5900995
