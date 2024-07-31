@@ -10,21 +10,21 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/VictoriaMetrics/metrics"
 	"github.com/holiman/uint256"
+	"github.com/ledgerwatch/erigon-lib/kv/temporal"
+	"github.com/ledgerwatch/log/v3"
+	btree2 "github.com/tidwall/btree"
+
 	"github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/dbg"
 	"github.com/ledgerwatch/erigon-lib/common/length"
 	"github.com/ledgerwatch/erigon-lib/etl"
 	"github.com/ledgerwatch/erigon-lib/kv"
+	"github.com/ledgerwatch/erigon-lib/kv/dbutils"
 	"github.com/ledgerwatch/erigon-lib/kv/order"
+	"github.com/ledgerwatch/erigon-lib/metrics"
 	libstate "github.com/ledgerwatch/erigon-lib/state"
-	"github.com/ledgerwatch/log/v3"
-	btree2 "github.com/tidwall/btree"
-
 	"github.com/ledgerwatch/erigon/cmd/state/exec22"
-	"github.com/ledgerwatch/erigon/common/dbutils"
-	"github.com/ledgerwatch/erigon/core/state/temporal"
 	"github.com/ledgerwatch/erigon/core/types/accounts"
 	"github.com/ledgerwatch/erigon/turbo/shards"
 )
@@ -32,7 +32,7 @@ import (
 const CodeSizeTable = "CodeSize"
 const StorageTable = "Storage"
 
-var ExecTxsDone = metrics.NewCounter(`exec_txs_done`)
+var execTxsDone = metrics.NewCounter(`exec_txs_done`)
 
 type StateV3 struct {
 	lock           sync.RWMutex
@@ -275,7 +275,7 @@ func (rs *StateV3) RegisterSender(txTask *exec22.TxTask) bool {
 }
 
 func (rs *StateV3) CommitTxNum(sender *common.Address, txNum uint64, in *exec22.QueueWithRetry) (count int) {
-	ExecTxsDone.Inc()
+	execTxsDone.Inc()
 
 	rs.triggerLock.Lock()
 	defer rs.triggerLock.Unlock()
@@ -293,7 +293,7 @@ func (rs *StateV3) CommitTxNum(sender *common.Address, txNum uint64, in *exec22.
 	return count
 }
 
-func (rs *StateV3) writeStateHistory(roTx kv.Tx, txTask *exec22.TxTask, agg *libstate.AggregatorV3) error {
+func (rs *StateV3) writeStateHistory(roTx kv.Tx, txTask *exec22.TxTask, agg *libstate.Aggregator) error {
 	rs.lock.RLock()
 	defer rs.lock.RUnlock()
 
@@ -401,7 +401,7 @@ func (rs *StateV3) writeStateHistory(roTx kv.Tx, txTask *exec22.TxTask, agg *lib
 	return nil
 }
 
-func (rs *StateV3) applyState(roTx kv.Tx, txTask *exec22.TxTask, agg *libstate.AggregatorV3) error {
+func (rs *StateV3) applyState(roTx kv.Tx, txTask *exec22.TxTask, agg *libstate.Aggregator) error {
 	emptyRemoval := txTask.Rules.IsSpuriousDragon
 	rs.lock.Lock()
 	defer rs.lock.Unlock()
@@ -449,7 +449,7 @@ func (rs *StateV3) applyState(roTx kv.Tx, txTask *exec22.TxTask, agg *libstate.A
 	return nil
 }
 
-func (rs *StateV3) ApplyState(roTx kv.Tx, txTask *exec22.TxTask, agg *libstate.AggregatorV3) error {
+func (rs *StateV3) ApplyState(roTx kv.Tx, txTask *exec22.TxTask, agg *libstate.Aggregator) error {
 	defer agg.BatchHistoryWriteStart().BatchHistoryWriteEnd()
 
 	agg.SetTxNum(txTask.TxNum)
@@ -467,7 +467,7 @@ func (rs *StateV3) ApplyState(roTx kv.Tx, txTask *exec22.TxTask, agg *libstate.A
 	return nil
 }
 
-func (rs *StateV3) ApplyHistory(txTask *exec22.TxTask, agg *libstate.AggregatorV3) error {
+func (rs *StateV3) ApplyHistory(txTask *exec22.TxTask, agg *libstate.Aggregator) error {
 	if dbg.DiscardHistory() {
 		return nil
 	}
@@ -521,7 +521,7 @@ func recoverCodeHashPlain(acc *accounts.Account, db kv.Tx, key []byte) {
 	}
 }
 
-func (rs *StateV3) Unwind(ctx context.Context, tx kv.RwTx, txUnwindTo uint64, agg *libstate.AggregatorV3, accumulator *shards.Accumulator) error {
+func (rs *StateV3) Unwind(ctx context.Context, tx kv.RwTx, blockUnwindTo, txUnwindTo uint64, agg *libstate.Aggregator, accumulator *shards.Accumulator) error {
 	agg.SetTx(tx)
 	var currentInc uint64
 	handle := func(k, v []byte, table etl.CurrentTableReader, next etl.LoadNextFunc) error {
@@ -603,12 +603,12 @@ func (rs *StateV3) Unwind(ctx context.Context, tx kv.RwTx, txUnwindTo uint64, ag
 	stateChanges := etl.NewCollector("", "", etl.NewOldestEntryBuffer(etl.BufferOptimalSize), rs.logger)
 	defer stateChanges.Close()
 
-	var actx *libstate.AggregatorV3Context
+	var actx *libstate.AggregatorRoTx
 	switch ttx := tx.(type) {
 	case *temporal.Tx:
 		actx = ttx.AggCtx()
 	default:
-		actx = agg.MakeContext()
+		actx = agg.BeginFilesRo()
 	}
 
 	{
@@ -652,7 +652,9 @@ func (rs *StateV3) Unwind(ctx context.Context, tx kv.RwTx, txUnwindTo uint64, ag
 	return nil
 }
 
-func (rs *StateV3) DoneCount() uint64 { return ExecTxsDone.Get() }
+func (rs *StateV3) DoneCount() uint64 {
+	return execTxsDone.GetValueUint64()
+}
 
 func (rs *StateV3) SizeEstimate() (r uint64) {
 	rs.lock.RLock()

@@ -47,7 +47,7 @@ func (api *OtterscanAPIImpl) GetContractCreator(ctx context.Context, addr common
 		return nil, nil
 	}
 
-	chainConfig, err := api.chainConfig(tx)
+	chainConfig, err := api.chainConfig(ctx, tx)
 	if err != nil {
 		return nil, err
 	}
@@ -211,6 +211,12 @@ func (api *OtterscanAPIImpl) GetContractCreator(ctx context.Context, addr common
 	defer bitmapdb.ReturnToPool64(bm)
 	prevShardMaxBl := uint64(0)
 	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
 		_, err := bm.ReadFrom(bytes.NewReader(v))
 		if err != nil {
 			return nil, err

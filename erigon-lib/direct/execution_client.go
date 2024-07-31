@@ -45,6 +45,10 @@ func (s *ExecutionClientDirect) GetBodiesByRange(ctx context.Context, in *execut
 	return s.server.GetBodiesByRange(ctx, in)
 }
 
+func (s *ExecutionClientDirect) HasBlock(ctx context.Context, in *execution.GetSegmentRequest, opts ...grpc.CallOption) (*execution.HasBlockResponse, error) {
+	return s.server.HasBlock(ctx, in)
+}
+
 func (s *ExecutionClientDirect) GetAssembledBlock(ctx context.Context, in *execution.GetAssembledBlockRequest, opts ...grpc.CallOption) (*execution.GetAssembledBlockResponse, error) {
 	return s.server.GetAssembledBlock(ctx, in)
 }
@@ -95,4 +99,8 @@ func (s *ExecutionClientDirect) GetForkChoice(ctx context.Context, in *emptypb.E
 
 func (s *ExecutionClientDirect) Ready(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*execution.ReadyResponse, error) {
 	return s.server.Ready(ctx, in)
+}
+
+func (s *ExecutionClientDirect) FrozenBlocks(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*execution.FrozenBlocksResponse, error) {
+	return s.server.FrozenBlocks(ctx, in)
 }

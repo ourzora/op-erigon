@@ -30,12 +30,14 @@ const (
 	Execution_GetTD_FullMethodName               = "/execution.Execution/GetTD"
 	Execution_GetHeader_FullMethodName           = "/execution.Execution/GetHeader"
 	Execution_GetBody_FullMethodName             = "/execution.Execution/GetBody"
+	Execution_HasBlock_FullMethodName            = "/execution.Execution/HasBlock"
 	Execution_GetBodiesByRange_FullMethodName    = "/execution.Execution/GetBodiesByRange"
 	Execution_GetBodiesByHashes_FullMethodName   = "/execution.Execution/GetBodiesByHashes"
 	Execution_IsCanonicalHash_FullMethodName     = "/execution.Execution/IsCanonicalHash"
 	Execution_GetHeaderHashNumber_FullMethodName = "/execution.Execution/GetHeaderHashNumber"
 	Execution_GetForkChoice_FullMethodName       = "/execution.Execution/GetForkChoice"
 	Execution_Ready_FullMethodName               = "/execution.Execution/Ready"
+	Execution_FrozenBlocks_FullMethodName        = "/execution.Execution/FrozenBlocks"
 )
 
 // ExecutionClient is the client API for Execution service.
@@ -56,6 +58,7 @@ type ExecutionClient interface {
 	GetTD(ctx context.Context, in *GetSegmentRequest, opts ...grpc.CallOption) (*GetTDResponse, error)
 	GetHeader(ctx context.Context, in *GetSegmentRequest, opts ...grpc.CallOption) (*GetHeaderResponse, error)
 	GetBody(ctx context.Context, in *GetSegmentRequest, opts ...grpc.CallOption) (*GetBodyResponse, error)
+	HasBlock(ctx context.Context, in *GetSegmentRequest, opts ...grpc.CallOption) (*HasBlockResponse, error)
 	// Ranges
 	GetBodiesByRange(ctx context.Context, in *GetBodiesByRangeRequest, opts ...grpc.CallOption) (*GetBodiesBatchResponse, error)
 	GetBodiesByHashes(ctx context.Context, in *GetBodiesByHashesRequest, opts ...grpc.CallOption) (*GetBodiesBatchResponse, error)
@@ -66,6 +69,8 @@ type ExecutionClient interface {
 	// Misc
 	// We want to figure out whether we processed snapshots and cleanup sync cycles.
 	Ready(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ReadyResponse, error)
+	// Frozen blocks are how many blocks are in snapshots .seg files.
+	FrozenBlocks(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*FrozenBlocksResponse, error)
 }
 
 type executionClient struct {
@@ -157,6 +162,15 @@ func (c *executionClient) GetBody(ctx context.Context, in *GetSegmentRequest, op
 	return out, nil
 }
 
+func (c *executionClient) HasBlock(ctx context.Context, in *GetSegmentRequest, opts ...grpc.CallOption) (*HasBlockResponse, error) {
+	out := new(HasBlockResponse)
+	err := c.cc.Invoke(ctx, Execution_HasBlock_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executionClient) GetBodiesByRange(ctx context.Context, in *GetBodiesByRangeRequest, opts ...grpc.CallOption) (*GetBodiesBatchResponse, error) {
 	out := new(GetBodiesBatchResponse)
 	err := c.cc.Invoke(ctx, Execution_GetBodiesByRange_FullMethodName, in, out, opts...)
@@ -211,6 +225,15 @@ func (c *executionClient) Ready(ctx context.Context, in *emptypb.Empty, opts ...
 	return out, nil
 }
 
+func (c *executionClient) FrozenBlocks(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*FrozenBlocksResponse, error) {
+	out := new(FrozenBlocksResponse)
+	err := c.cc.Invoke(ctx, Execution_FrozenBlocks_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExecutionServer is the server API for Execution service.
 // All implementations must embed UnimplementedExecutionServer
 // for forward compatibility
@@ -229,6 +252,7 @@ type ExecutionServer interface {
 	GetTD(context.Context, *GetSegmentRequest) (*GetTDResponse, error)
 	GetHeader(context.Context, *GetSegmentRequest) (*GetHeaderResponse, error)
 	GetBody(context.Context, *GetSegmentRequest) (*GetBodyResponse, error)
+	HasBlock(context.Context, *GetSegmentRequest) (*HasBlockResponse, error)
 	// Ranges
 	GetBodiesByRange(context.Context, *GetBodiesByRangeRequest) (*GetBodiesBatchResponse, error)
 	GetBodiesByHashes(context.Context, *GetBodiesByHashesRequest) (*GetBodiesBatchResponse, error)
@@ -239,6 +263,8 @@ type ExecutionServer interface {
 	// Misc
 	// We want to figure out whether we processed snapshots and cleanup sync cycles.
 	Ready(context.Context, *emptypb.Empty) (*ReadyResponse, error)
+	// Frozen blocks are how many blocks are in snapshots .seg files.
+	FrozenBlocks(context.Context, *emptypb.Empty) (*FrozenBlocksResponse, error)
 	mustEmbedUnimplementedExecutionServer()
 }
 
@@ -273,6 +299,9 @@ func (UnimplementedExecutionServer) GetHeader(context.Context, *GetSegmentReques
 func (UnimplementedExecutionServer) GetBody(context.Context, *GetSegmentRequest) (*GetBodyResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetBody not implemented")
 }
+func (UnimplementedExecutionServer) HasBlock(context.Context, *GetSegmentRequest) (*HasBlockResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method HasBlock not implemented")
+}
 func (UnimplementedExecutionServer) GetBodiesByRange(context.Context, *GetBodiesByRangeRequest) (*GetBodiesBatchResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetBodiesByRange not implemented")
 }
@@ -290,6 +319,9 @@ func (UnimplementedExecutionServer) GetForkChoice(context.Context, *emptypb.Empt
 }
 func (UnimplementedExecutionServer) Ready(context.Context, *emptypb.Empty) (*ReadyResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Ready not implemented")
+}
+func (UnimplementedExecutionServer) FrozenBlocks(context.Context, *emptypb.Empty) (*FrozenBlocksResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method FrozenBlocks not implemented")
 }
 func (UnimplementedExecutionServer) mustEmbedUnimplementedExecutionServer() {}
 
@@ -466,6 +498,24 @@ func _Execution_GetBody_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Execution_HasBlock_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSegmentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutionServer).HasBlock(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Execution_HasBlock_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutionServer).HasBlock(ctx, req.(*GetSegmentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Execution_GetBodiesByRange_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetBodiesByRangeRequest)
 	if err := dec(in); err != nil {
@@ -574,6 +624,24 @@ func _Execution_Ready_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Execution_FrozenBlocks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(emptypb.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutionServer).FrozenBlocks(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Execution_FrozenBlocks_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutionServer).FrozenBlocks(ctx, req.(*emptypb.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Execution_ServiceDesc is the grpc.ServiceDesc for Execution service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -618,6 +686,10 @@ var Execution_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Execution_GetBody_Handler,
 		},
 		{
+			MethodName: "HasBlock",
+			Handler:    _Execution_HasBlock_Handler,
+		},
+		{
 			MethodName: "GetBodiesByRange",
 			Handler:    _Execution_GetBodiesByRange_Handler,
 		},
@@ -640,6 +712,10 @@ var Execution_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Ready",
 			Handler:    _Execution_Ready_Handler,
+		},
+		{
+			MethodName: "FrozenBlocks",
+			Handler:    _Execution_FrozenBlocks_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

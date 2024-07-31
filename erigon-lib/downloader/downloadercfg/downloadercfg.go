@@ -17,18 +17,19 @@
 package downloadercfg
 
 import (
-	"io/ioutil"
 	"net"
 	"net/url"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/anacrolix/dht/v2"
 	lg "github.com/anacrolix/log"
 	"github.com/anacrolix/torrent"
 	"github.com/c2h5oh/datasize"
-	"github.com/ledgerwatch/erigon-lib/common"
+	"github.com/ledgerwatch/erigon-lib/chain/snapcfg"
 	"github.com/ledgerwatch/erigon-lib/common/datadir"
 	"github.com/ledgerwatch/erigon-lib/common/dir"
 	"github.com/ledgerwatch/log/v3"
@@ -42,19 +43,36 @@ const DefaultPieceSize = 2 * 1024 * 1024
 
 // DefaultNetworkChunkSize - how much data request per 1 network call to peer.
 // default: 16Kb
-const DefaultNetworkChunkSize = 512 * 1024
+const DefaultNetworkChunkSize = 256 * 1024
 
 type Cfg struct {
 	ClientConfig  *torrent.ClientConfig
 	DownloadSlots int
-	WebSeedUrls   []*url.URL
-	WebSeedFiles  []string
-	Dirs          datadir.Dirs
+
+	WebSeedUrls                     []*url.URL
+	WebSeedFiles                    []string
+	SnapshotConfig                  *snapcfg.Cfg
+	DownloadTorrentFilesFromWebseed bool
+	AddTorrentsFromDisk             bool
+	SnapshotLock                    bool
+	ChainName                       string
+
+	Dirs datadir.Dirs
 }
 
 func Default() *torrent.ClientConfig {
 	torrentConfig := torrent.NewDefaultClientConfig()
-	torrentConfig.PieceHashersPerTorrent = runtime.NumCPU()
+	// better don't increase because erigon periodically producing "new seedable files" - and adding them to downloader.
+	// it must not impact chain tip sync - so, limit resources to minimum by default.
+	// but when downloader is started as a separated process - rise it to max
+	//torrentConfig.PieceHashersPerTorrent = cmp.Max(1, runtime.NumCPU()-1)
+
+	torrentConfig.MinDialTimeout = 6 * time.Second    //default: 3s
+	torrentConfig.HandshakesTimeout = 8 * time.Second //default: 4s
+
+	// default limit is 1MB, but we have 2MB pieces which brings us to:
+	//   *torrent.PeerConn: waiting for alloc limit reservation: reservation for 1802972 exceeds limiter max 1048576
+	torrentConfig.MaxAllocPeerRequestDataPerConn = int64(DefaultPieceSize)
 
 	// enable dht
 	torrentConfig.NoDHT = true
@@ -78,7 +96,7 @@ func Default() *torrent.ClientConfig {
 	return torrentConfig
 }
 
-func New(dirs datadir.Dirs, version string, verbosity lg.Level, downloadRate, uploadRate datasize.ByteSize, port, connsPerFile, downloadSlots int, staticPeers []string, webseeds string) (*Cfg, error) {
+func New(dirs datadir.Dirs, version string, verbosity lg.Level, downloadRate, uploadRate datasize.ByteSize, port, connsPerFile, downloadSlots int, staticPeers, webseeds []string, chainName string, lockSnapshots bool) (*Cfg, error) {
 	torrentConfig := Default()
 	torrentConfig.DataDir = dirs.Snap // `DataDir` of torrent-client-lib is different from Erigon's `DataDir`. Just same naming.
 
@@ -91,20 +109,22 @@ func New(dirs datadir.Dirs, version string, verbosity lg.Level, downloadRate, up
 	// check if ipv6 is enabled
 	torrentConfig.DisableIPv6 = !getIpv6Enabled()
 
-	// rates are divided by 2 - I don't know why it works, maybe bug inside torrent lib accounting
-	torrentConfig.UploadRateLimiter = rate.NewLimiter(rate.Limit(uploadRate.Bytes()), 2*DefaultNetworkChunkSize) // default: unlimited
-	if downloadRate.Bytes() < 500_000_000 {
-		b := 2 * DefaultNetworkChunkSize
-		if downloadRate.Bytes() > DefaultNetworkChunkSize {
-			b = int(2 * downloadRate.Bytes())
-		}
-		torrentConfig.DownloadRateLimiter = rate.NewLimiter(rate.Limit(downloadRate.Bytes()), b) // default: unlimited
+	if uploadRate > 512*datasize.MB {
+		torrentConfig.UploadRateLimiter = rate.NewLimiter(rate.Inf, DefaultNetworkChunkSize) // default: unlimited
+	} else {
+		torrentConfig.UploadRateLimiter = rate.NewLimiter(rate.Limit(uploadRate.Bytes()), DefaultNetworkChunkSize) // default: unlimited
+	}
+
+	if downloadRate > 512*datasize.MB {
+		torrentConfig.DownloadRateLimiter = rate.NewLimiter(rate.Inf, DefaultNetworkChunkSize) // default: unlimited
+	} else {
+		torrentConfig.DownloadRateLimiter = rate.NewLimiter(rate.Limit(downloadRate.Bytes()), DefaultNetworkChunkSize) // default: unlimited
 	}
 
 	// debug
-	//	torrentConfig.Debug = false
-	torrentConfig.Logger.WithFilterLevel(verbosity)
-	torrentConfig.Logger.Handlers = []lg.Handler{adapterHandler{}}
+	//torrentConfig.Debug = true
+	torrentConfig.Logger = torrentConfig.Logger.WithFilterLevel(verbosity)
+	torrentConfig.Logger.SetHandlers(adapterHandler{})
 
 	if len(staticPeers) > 0 {
 		torrentConfig.NoDHT = false
@@ -142,33 +162,53 @@ func New(dirs datadir.Dirs, version string, verbosity lg.Level, downloadRate, up
 		//staticPeers
 	}
 
-	webseedUrlsOrFiles := common.CliString2Array(webseeds)
-	webseedUrls := make([]*url.URL, 0, len(webseedUrlsOrFiles))
-	webseedFiles := make([]string, 0, len(webseedUrlsOrFiles))
+	webseedUrlsOrFiles := webseeds
+	webseedHttpProviders := make([]*url.URL, 0, len(webseedUrlsOrFiles))
+	webseedFileProviders := make([]string, 0, len(webseedUrlsOrFiles))
 	for _, webseed := range webseedUrlsOrFiles {
-		uri, err := url.ParseRequestURI(webseed)
-		if err != nil {
-			if strings.HasSuffix(webseed, ".toml") && dir.FileExist(webseed) {
-				webseedFiles = append(webseedFiles, webseed)
+		if !strings.HasPrefix(webseed, "v") { // has marker v1/v2/...
+			uri, err := url.ParseRequestURI(webseed)
+			if err != nil {
+				if strings.HasSuffix(webseed, ".toml") && dir.FileExist(webseed) {
+					webseedFileProviders = append(webseedFileProviders, webseed)
+				}
+				continue
 			}
+			webseedHttpProviders = append(webseedHttpProviders, uri)
 			continue
 		}
-		webseedUrls = append(webseedUrls, uri)
+
+		if strings.HasPrefix(webseed, "v1:") {
+			withoutVerisonPrefix := webseed[3:]
+			if !strings.HasPrefix(withoutVerisonPrefix, "https:") {
+				continue
+			}
+			uri, err := url.ParseRequestURI(withoutVerisonPrefix)
+			if err != nil {
+				log.Warn("[webseed] can't parse url", "err", err, "url", withoutVerisonPrefix)
+				continue
+			}
+			webseedHttpProviders = append(webseedHttpProviders, uri)
+		} else {
+			continue
+		}
 	}
-	localCfgFile := filepath.Join(dirs.DataDir, "webseeds.toml") // datadir/webseeds.toml allowed
+	localCfgFile := filepath.Join(dirs.DataDir, "webseed.toml") // datadir/webseed.toml allowed
 	if dir.FileExist(localCfgFile) {
-		webseedFiles = append(webseedFiles, localCfgFile)
+		webseedFileProviders = append(webseedFileProviders, localCfgFile)
 	}
 
-	return &Cfg{Dirs: dirs,
+	return &Cfg{Dirs: dirs, ChainName: chainName,
 		ClientConfig: torrentConfig, DownloadSlots: downloadSlots,
-		WebSeedUrls: webseedUrls, WebSeedFiles: webseedFiles,
+		WebSeedUrls: webseedHttpProviders, WebSeedFiles: webseedFileProviders,
+		DownloadTorrentFilesFromWebseed: true, AddTorrentsFromDisk: true, SnapshotLock: lockSnapshots,
+		SnapshotConfig: snapcfg.KnownCfg(chainName),
 	}, nil
 }
 
 func getIpv6Enabled() bool {
 	if runtime.GOOS == "linux" {
-		file, err := ioutil.ReadFile("/sys/module/ipv6/parameters/disable")
+		file, err := os.ReadFile("/sys/module/ipv6/parameters/disable")
 		if err != nil {
 			log.Warn("could not read /sys/module/ipv6/parameters/disable for ipv6 detection")
 			return false

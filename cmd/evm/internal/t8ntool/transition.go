@@ -29,7 +29,7 @@ import (
 
 	"github.com/holiman/uint256"
 	"github.com/ledgerwatch/erigon-lib/common/datadir"
-	"github.com/ledgerwatch/erigon/core/state/temporal"
+	"github.com/ledgerwatch/erigon-lib/kv/temporal/temporaltest"
 	"github.com/ledgerwatch/log/v3"
 	"github.com/urfave/cli/v2"
 
@@ -39,7 +39,6 @@ import (
 	"github.com/ledgerwatch/erigon-lib/common/length"
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon-lib/kv/kvcfg"
-	"github.com/ledgerwatch/erigon/common"
 	"github.com/ledgerwatch/erigon/common/math"
 	"github.com/ledgerwatch/erigon/consensus/ethash"
 	"github.com/ledgerwatch/erigon/consensus/merge"
@@ -295,7 +294,7 @@ func Main(ctx *cli.Context) error {
 		return h
 	}
 
-	_, db, _ := temporal.NewTestDB(nil, datadir.New(""), nil)
+	_, db, _ := temporaltest.NewTestDB(nil, datadir.New(""))
 	defer db.Close()
 
 	tx, err := db.BeginRw(context.Background())
@@ -610,8 +609,8 @@ func CalculateStateRoot(tx kv.RwTx) (*libcommon.Hash, error) {
 	if err != nil {
 		return nil, err
 	}
-	h := common.NewHasher()
-	defer common.ReturnHasherToPool(h)
+	h := libcommon.NewHasher()
+	defer libcommon.ReturnHasherToPool(h)
 	for k, v, err := c.First(); k != nil; k, v, err = c.Next() {
 		if err != nil {
 			return nil, fmt.Errorf("interate over plain state: %w", err)
@@ -634,11 +633,11 @@ func CalculateStateRoot(tx kv.RwTx) (*libcommon.Hash, error) {
 			h.Sha.Write(k[length.Addr+length.Incarnation:])
 			//nolint:errcheck
 			h.Sha.Read(newK[length.Hash+length.Incarnation:])
-			if err = tx.Put(kv.HashedStorage, newK, common.CopyBytes(v)); err != nil {
+			if err = tx.Put(kv.HashedStorage, newK, libcommon.CopyBytes(v)); err != nil {
 				return nil, fmt.Errorf("insert hashed key: %w", err)
 			}
 		} else {
-			if err = tx.Put(kv.HashedAccounts, newK, common.CopyBytes(v)); err != nil {
+			if err = tx.Put(kv.HashedAccounts, newK, libcommon.CopyBytes(v)); err != nil {
 				return nil, fmt.Errorf("insert hashed key: %w", err)
 			}
 		}

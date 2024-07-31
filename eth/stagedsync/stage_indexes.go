@@ -7,7 +7,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/ledgerwatch/erigon-lib/kv/dbutils"
 	"runtime"
+	"slices"
 	"time"
 
 	"github.com/RoaringBitmap/roaring/roaring64"
@@ -21,10 +23,8 @@ import (
 	"github.com/ledgerwatch/erigon-lib/kv/bitmapdb"
 	"github.com/ledgerwatch/erigon-lib/kv/temporal/historyv2"
 	"github.com/ledgerwatch/log/v3"
-	"golang.org/x/exp/slices"
 
 	"github.com/ledgerwatch/erigon/common/changeset"
-	"github.com/ledgerwatch/erigon/common/dbutils"
 	"github.com/ledgerwatch/erigon/ethdb"
 	"github.com/ledgerwatch/erigon/ethdb/prune"
 )

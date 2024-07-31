@@ -7,8 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/c2h5oh/datasize"
-	"github.com/erigontech/mdbx-go/mdbx"
+	"github.com/ledgerwatch/erigon-lib/kv/temporal"
 	"github.com/ledgerwatch/log/v3"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/semaphore"
@@ -18,8 +17,6 @@ import (
 	kv2 "github.com/ledgerwatch/erigon-lib/kv/mdbx"
 
 	"github.com/ledgerwatch/erigon/cmd/utils"
-	"github.com/ledgerwatch/erigon/core/state/temporal"
-	"github.com/ledgerwatch/erigon/core/systemcontracts"
 	"github.com/ledgerwatch/erigon/migrations"
 	"github.com/ledgerwatch/erigon/turbo/debug"
 	"github.com/ledgerwatch/erigon/turbo/logging"
@@ -64,9 +61,10 @@ func dbCfg(label kv.Label, path string) kv2.MdbxOpts {
 	const ThreadsLimit = 9_000
 	limiterB := semaphore.NewWeighted(ThreadsLimit)
 	opts := kv2.NewMDBX(log.New()).Path(path).Label(label).RoTxsLimiter(limiterB)
-	if label == kv.ChainDB {
-		opts = opts.MapSize(8 * datasize.TB)
-	}
+	// integration tool don't intent to create db, then easiest way to open db - it's pass mdbx.Accede flag, which allow
+	// to read all options from DB, instead of overriding them
+	opts = opts.Accede()
+
 	if databaseVerbosity != -1 {
 		opts = opts.DBVerbosity(kv.DBVerbosityLvl(databaseVerbosity))
 	}
@@ -74,10 +72,6 @@ func dbCfg(label kv.Label, path string) kv2.MdbxOpts {
 }
 
 func openDB(opts kv2.MdbxOpts, applyMigrations bool, logger log.Logger) (kv.RwDB, error) {
-	// integration tool don't intent to create db, then easiest way to open db - it's pass mdbx.Accede flag, which allow
-	// to read all options from DB, instead of overriding them
-	opts = opts.Flags(func(f uint) uint { return f | mdbx.Accede })
-
 	db := opts.MustOpen()
 	if applyMigrations {
 		migrator := migrations.NewMigrator(opts.GetLabel())
@@ -111,7 +105,7 @@ func openDB(opts kv2.MdbxOpts, applyMigrations bool, logger log.Logger) (kv.RwDB
 		}
 		if h3 {
 			_, _, agg := allSnapshots(context.Background(), db, logger)
-			tdb, err := temporal.New(db, agg, systemcontracts.SystemContractCodeLookup[chain])
+			tdb, err := temporal.New(db, agg)
 			if err != nil {
 				return nil, err
 			}

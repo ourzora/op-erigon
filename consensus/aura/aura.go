@@ -31,7 +31,6 @@ import (
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/kv"
 
-	"github.com/ledgerwatch/erigon/common"
 	"github.com/ledgerwatch/erigon/consensus"
 	"github.com/ledgerwatch/erigon/consensus/clique"
 	"github.com/ledgerwatch/erigon/consensus/ethash"
@@ -204,7 +203,7 @@ func (e *EpochManager) zoomToAfter(chain consensus.ChainHeaderReader, er *NonTra
 // / or transitions to.
 // / This will give the epoch that any children of this parent belong to.
 // /
-// / The block corresponding the the parent hash must be stored already.
+// / The block corresponding the parent hash must be stored already.
 // nolint
 func epochTransitionFor(chain consensus.ChainHeaderReader, e *NonTransactionalEpochReader, parentHash libcommon.Hash) (transition EpochTransition, ok bool) {
 	//TODO: probably this version of func doesn't support non-canonical epoch transitions
@@ -267,7 +266,7 @@ func NewAuRa(spec *chain.AuRaConfig, db kv.RwDB) (*AuRa, error) {
 		StepDuration:        auraParams.StepDurations[0],
 	}
 	durations = append(durations, durInfo)
-	times := common.SortedKeys(auraParams.StepDurations)
+	times := libcommon.SortedKeys(auraParams.StepDurations)
 	for i := 1; i < len(auraParams.StepDurations); i++ { // skip first
 		time := times[i]
 		dur := auraParams.StepDurations[time]

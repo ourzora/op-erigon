@@ -11,14 +11,15 @@ import (
 	"google.golang.org/grpc"
 
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
+	"github.com/ledgerwatch/erigon-lib/common/hexutil"
 	"github.com/ledgerwatch/erigon-lib/common/hexutility"
 	"github.com/ledgerwatch/erigon-lib/gointerfaces"
 	txpool_proto "github.com/ledgerwatch/erigon-lib/gointerfaces/txpool"
 	"github.com/ledgerwatch/erigon-lib/kv"
-	"github.com/ledgerwatch/erigon-lib/kv/memdb"
+	"github.com/ledgerwatch/erigon-lib/kv/membatchwithdb"
+	"github.com/ledgerwatch/erigon-lib/opstack"
 	types2 "github.com/ledgerwatch/erigon-lib/types"
 
-	"github.com/ledgerwatch/erigon/common/hexutil"
 	"github.com/ledgerwatch/erigon/core"
 	"github.com/ledgerwatch/erigon/core/state"
 	"github.com/ledgerwatch/erigon/core/types"
@@ -50,7 +51,7 @@ func (api *APIImpl) Call(ctx context.Context, args ethapi2.CallArgs, blockNrOrHa
 	if err != nil {
 		return nil, err
 	}
-	chainConfig, err := api.chainConfig(tx)
+	chainConfig, err := api.chainConfig(ctx, tx)
 	if err != nil {
 		return nil, fmt.Errorf("read chain config: %v", err)
 	}
@@ -75,7 +76,7 @@ func (api *APIImpl) Call(ctx context.Context, args ethapi2.CallArgs, blockNrOrHa
 	if err != nil {
 		return nil, err
 	}
-	block, err := api.blockWithSenders(tx, hash, blockNumber)
+	block, err := api.blockWithSenders(ctx, tx, hash, blockNumber)
 	if err != nil {
 		return nil, err
 	}
@@ -153,29 +154,30 @@ func (api *APIImpl) EstimateGas(ctx context.Context, argsOrNil *ethapi2.CallArgs
 		args.From = new(libcommon.Address)
 	}
 
-	bNrOrHash := rpc.BlockNumberOrHashWithNumber(rpc.PendingBlockNumber)
-	if blockNrOrHash != nil {
-		bNrOrHash = *blockNrOrHash
-	}
-
-	// Handle pre-bedrock blocks
-	blockNum, err := api.blockNumberFromBlockNumberOrHash(dbtx, &bNrOrHash)
-	if err != nil {
-		return 0, err
-	}
-	chainConfig, err := api.chainConfig(dbtx)
+	chainConfig, err := api.chainConfig(ctx, dbtx)
 	if err != nil {
 		return 0, fmt.Errorf("read chain config: %v", err)
 	}
-	if chainConfig.IsOptimismPreBedrock(blockNum) {
+
+	latestCanBlockNumber, latestCanHash, isLatest, err := rpchelper.GetCanonicalBlockNumber(latestNumOrHash, dbtx, api.filters) // DoCall cannot be executed on non-canonical blocks
+	if err != nil {
+		return 0, err
+	}
+
+	if chainConfig.IsOptimismPreBedrock(latestCanBlockNumber) {
 		if api.historicalRPCService == nil {
 			return 0, rpc.ErrNoHistoricalFallback
 		}
 		var result hexutil.Uint64
-		if err := api.relayToHistoricalBackend(ctx, &result, "eth_estimateGas", args, hexutil.EncodeUint64(blockNum)); err != nil {
+		if err := api.relayToHistoricalBackend(ctx, &result, "eth_estimateGas", args, hexutil.EncodeUint64(latestCanBlockNumber)); err != nil {
 			return 0, fmt.Errorf("historical backend error: %w", err)
 		}
 		return result, nil
+	}
+
+	bNrOrHash := rpc.BlockNumberOrHashWithNumber(rpc.PendingBlockNumber)
+	if blockNrOrHash != nil {
+		bNrOrHash = *blockNrOrHash
 	}
 
 	// Determine the highest gas limit can be used during the estimation.
@@ -258,15 +260,10 @@ func (api *APIImpl) EstimateGas(ctx context.Context, argsOrNil *ethapi2.CallArgs
 
 	engine := api.engine()
 
-	latestCanBlockNumber, latestCanHash, isLatest, err := rpchelper.GetCanonicalBlockNumber(latestNumOrHash, dbtx, api.filters) // DoCall cannot be executed on non-canonical blocks
-	if err != nil {
-		return 0, err
-	}
-
 	// try and get the block from the lru cache first then try DB before failing
 	block := api.tryBlockFromLru(latestCanHash)
 	if block == nil {
-		block, err = api.blockWithSenders(dbtx, latestCanHash, latestCanBlockNumber)
+		block, err = api.blockWithSenders(ctx, dbtx, latestCanHash, latestCanBlockNumber)
 		if err != nil {
 			return 0, err
 		}
@@ -345,9 +342,7 @@ func (api *APIImpl) EstimateGas(ctx context.Context, argsOrNil *ethapi2.CallArgs
 // assumes that if more than 100_000 blocks are skipped, that the entire trie
 // should be re-computed. Re-computing the entire trie will currently take ~15
 // minutes on mainnet.  The current limit has been chosen arbitrarily as
-// 'useful' without likely being overly computationally intense.  This parameter
-// could possibly be made configurable in the future if needed.
-var maxGetProofRewindBlockCount uint64 = 1_000
+// 'useful' without likely being overly computationally intense.
 
 // GetProof is partially implemented; no Storage proofs, and proofs must be for
 // blocks within maxGetProofRewindBlockCount blocks of the head.
@@ -360,6 +355,26 @@ func (api *APIImpl) GetProof(ctx context.Context, address libcommon.Address, sto
 	defer tx.Rollback()
 	if api.historyV3(tx) {
 		return nil, fmt.Errorf("not supported by Erigon3")
+	}
+
+	// Handle pre-bedrock blocks
+	blockNum, err := api.blockNumberFromBlockNumberOrHash(tx, &blockNrOrHash)
+	if err != nil {
+		return nil, err
+	}
+	chainConfig, err := api.chainConfig(ctx, tx)
+	if err != nil {
+		return nil, fmt.Errorf("read chain config: %v", err)
+	}
+	if chainConfig.IsOptimismPreBedrock(blockNum) {
+		if api.historicalRPCService == nil {
+			return nil, rpc.ErrNoHistoricalFallback
+		}
+		var result accounts.AccProofResult
+		if err := api.relayToHistoricalBackend(ctx, &result, "eth_getProof", address, storageKeys, hexutil.EncodeUint64(blockNum)); err != nil {
+			return nil, fmt.Errorf("historical backend error: %w", err)
+		}
+		return &result, nil
 	}
 
 	blockNr, _, _, err := rpchelper.GetBlockNumber(blockNrOrHash, tx, api.filters)
@@ -385,10 +400,10 @@ func (api *APIImpl) GetProof(ctx context.Context, address libcommon.Address, sto
 	rl := trie.NewRetainList(0)
 	var loader *trie.FlatDBTrieLoader
 	if blockNr < latestBlock {
-		if latestBlock-blockNr > maxGetProofRewindBlockCount {
-			return nil, fmt.Errorf("requested block is too old, block must be within %d blocks of the head block number (currently %d)", maxGetProofRewindBlockCount, latestBlock)
+		if latestBlock-blockNr > uint64(api.MaxGetProofRewindBlockCount) {
+			return nil, fmt.Errorf("requested block is too old, block must be within %d blocks of the head block number (currently %d)", uint64(api.MaxGetProofRewindBlockCount), latestBlock)
 		}
-		batch := memdb.NewMemoryBatch(tx, api.dirs.Tmp)
+		batch := membatchwithdb.NewMemoryBatch(tx, api.dirs.Tmp, api.logger)
 		defer batch.Rollback()
 
 		unwindState := &stagedsync.UnwindState{UnwindPoint: blockNr}
@@ -476,7 +491,7 @@ func (api *APIImpl) CreateAccessList(ctx context.Context, args ethapi2.CallArgs,
 	if err != nil {
 		return nil, err
 	}
-	chainConfig, err := api.chainConfig(tx)
+	chainConfig, err := api.chainConfig(ctx, tx)
 	if err != nil {
 		return nil, err
 	}
@@ -497,7 +512,7 @@ func (api *APIImpl) CreateAccessList(ctx context.Context, args ethapi2.CallArgs,
 	if err != nil {
 		return nil, err
 	}
-	block, err := api.blockWithSenders(tx, hash, blockNumber)
+	block, err := api.blockWithSenders(ctx, tx, hash, blockNumber)
 	if err != nil {
 		return nil, err
 	}
@@ -538,7 +553,14 @@ func (api *APIImpl) CreateAccessList(ctx context.Context, args ethapi2.CallArgs,
 			}
 			if reply.Found {
 				nonce = reply.Nonce + 1
+			} else {
+				a, err := stateReader.ReadAccountData(*args.From)
+				if err != nil {
+					return nil, err
+				}
+				nonce = a.Nonce + 1
 			}
+
 			args.Nonce = (*hexutil.Uint64)(&nonce)
 		}
 		to = crypto.CreateAddress(*args.From, uint64(*args.Nonce))
@@ -593,7 +615,7 @@ func (api *APIImpl) CreateAccessList(ctx context.Context, args ethapi2.CallArgs,
 		config := vm.Config{Tracer: tracer, Debug: true, NoBaseFee: true}
 		blockCtx := transactions.NewEVMBlockContext(engine, header, bNrOrHash.RequireCanonical, tx, api._blockReader)
 		txCtx := core.NewEVMTxContext(msg)
-		blockCtx.L1CostFunc = types.NewL1CostFunc(chainConfig, state)
+		blockCtx.L1CostFunc = opstack.NewL1CostFunc(chainConfig, state)
 
 		evm := vm.NewEVM(blockCtx, txCtx, state, chainConfig, config)
 		gp := new(core.GasPool).AddGas(msg.Gas()).AddBlobGas(msg.BlobGas())

@@ -24,33 +24,34 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"reflect"
+	"slices"
 	"sync"
 
 	"github.com/c2h5oh/datasize"
 	"github.com/ethereum-optimism/superchain-registry/superchain"
 	"github.com/holiman/uint256"
-	"golang.org/x/exp/slices"
+	"github.com/ledgerwatch/erigon-lib/config3"
+	"github.com/ledgerwatch/log/v3"
 
 	"github.com/ledgerwatch/erigon-lib/chain"
+	"github.com/ledgerwatch/erigon-lib/chain/networkname"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
+	"github.com/ledgerwatch/erigon-lib/common/hexutil"
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon-lib/kv/kvcfg"
 	"github.com/ledgerwatch/erigon-lib/kv/mdbx"
 	"github.com/ledgerwatch/erigon-lib/kv/rawdbv3"
 
 	"github.com/ledgerwatch/erigon/common"
-	"github.com/ledgerwatch/erigon/common/hexutil"
 	"github.com/ledgerwatch/erigon/consensus/ethash"
 	"github.com/ledgerwatch/erigon/consensus/merge"
 	"github.com/ledgerwatch/erigon/core/rawdb"
 	"github.com/ledgerwatch/erigon/core/state"
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/crypto"
-	"github.com/ledgerwatch/erigon/eth/ethconfig"
 	"github.com/ledgerwatch/erigon/params"
-	"github.com/ledgerwatch/erigon/params/networkname"
 	"github.com/ledgerwatch/erigon/turbo/trie"
-	"github.com/ledgerwatch/log/v3"
 )
 
 // CommitGenesisBlock writes or updates the genesis block in db.
@@ -67,16 +68,16 @@ import (
 //
 // The returned chain configuration is never nil.
 func CommitGenesisBlock(db kv.RwDB, genesis *types.Genesis, tmpDir string, logger log.Logger) (*chain.Config, *types.Block, error) {
-	return CommitGenesisBlockWithOverride(db, genesis, nil, nil, nil, tmpDir, logger)
+	return CommitGenesisBlockWithOverride(db, genesis, nil, nil, nil, nil, nil, nil, tmpDir, logger)
 }
 
-func CommitGenesisBlockWithOverride(db kv.RwDB, genesis *types.Genesis, overrideCancunTime, overrideShanghaiTime, overrideOptimismCanyonTime *big.Int, tmpDir string, logger log.Logger) (*chain.Config, *types.Block, error) {
+func CommitGenesisBlockWithOverride(db kv.RwDB, genesis *types.Genesis, overrideCancunTime, overrideShanghaiTime, overrideOptimismCanyonTime, overrideOptimismEcotoneTime, overrideOptimismFjordTime, overridePragueTime *big.Int, tmpDir string, logger log.Logger) (*chain.Config, *types.Block, error) {
 	tx, err := db.BeginRw(context.Background())
 	if err != nil {
 		return nil, nil, err
 	}
 	defer tx.Rollback()
-	c, b, err := WriteGenesisBlock(tx, genesis, overrideCancunTime, overrideShanghaiTime, overrideOptimismCanyonTime, tmpDir, logger)
+	c, b, err := WriteGenesisBlock(tx, genesis, overrideCancunTime, overrideShanghaiTime, overrideOptimismCanyonTime, overrideOptimismEcotoneTime, overrideOptimismFjordTime, overridePragueTime, tmpDir, logger)
 	if err != nil {
 		return c, b, err
 	}
@@ -87,7 +88,7 @@ func CommitGenesisBlockWithOverride(db kv.RwDB, genesis *types.Genesis, override
 	return c, b, nil
 }
 
-func WriteGenesisBlock(tx kv.RwTx, genesis *types.Genesis, overrideCancunTime, overrideShanghaiTime, overrideOptimismCanyonTime *big.Int, tmpDir string, logger log.Logger) (*chain.Config, *types.Block, error) {
+func WriteGenesisBlock(tx kv.RwTx, genesis *types.Genesis, overrideCancunTime, overrideShanghaiTime, overrideOptimismCanyonTime, overrideOptimismEcotoneTime, overrideOptimismFjordTime, overridePragueTime *big.Int, tmpDir string, logger log.Logger) (*chain.Config, *types.Block, error) {
 	var storedBlock *types.Block
 	if genesis != nil && genesis.Config == nil {
 		return params.AllProtocolChanges, nil, types.ErrGenesisNoConfig
@@ -99,8 +100,14 @@ func WriteGenesisBlock(tx kv.RwTx, genesis *types.Genesis, overrideCancunTime, o
 	}
 
 	applyOverrides := func(config *chain.Config) {
+		if overrideShanghaiTime != nil {
+			config.ShanghaiTime = overrideShanghaiTime
+		}
 		if overrideCancunTime != nil {
 			config.CancunTime = overrideCancunTime
+		}
+		if overridePragueTime != nil {
+			config.PragueTime = overridePragueTime
 		}
 		if config.IsOptimism() && overrideOptimismCanyonTime != nil {
 			config.CanyonTime = overrideOptimismCanyonTime
@@ -117,6 +124,20 @@ func WriteGenesisBlock(tx kv.RwTx, genesis *types.Genesis, overrideCancunTime, o
 					"shanghai", overrideShanghaiTime.String(), "canyon", overrideOptimismCanyonTime.String())
 			}
 		}
+		if config.IsOptimism() && overrideOptimismEcotoneTime != nil {
+			config.EcotoneTime = overrideOptimismEcotoneTime
+			// Cancun hardfork is included in Ecotone hardfork
+			config.CancunTime = overrideOptimismEcotoneTime
+		}
+		if overrideCancunTime != nil && config.IsOptimism() && overrideOptimismEcotoneTime != nil {
+			if overrideCancunTime.Cmp(overrideOptimismEcotoneTime) != 0 {
+				logger.Warn("Cancun hardfork time is overridden by optimism Ecotone time",
+					"cancun", overrideCancunTime.String(), "ecotone", overrideOptimismEcotoneTime.String())
+			}
+		}
+		if config.IsOptimism() && overrideOptimismFjordTime != nil {
+			config.FjordTime = overrideOptimismFjordTime
+		}
 	}
 
 	if (storedHash == libcommon.Hash{}) {
@@ -127,7 +148,7 @@ func WriteGenesisBlock(tx kv.RwTx, genesis *types.Genesis, overrideCancunTime, o
 			custom = false
 		}
 		applyOverrides(genesis.Config)
-		block, _, err1 := write(tx, genesis, tmpDir)
+		block, _, err1 := write(tx, genesis, tmpDir, logger)
 		if err1 != nil {
 			return genesis.Config, nil, err1
 		}
@@ -139,7 +160,7 @@ func WriteGenesisBlock(tx kv.RwTx, genesis *types.Genesis, overrideCancunTime, o
 
 	// Check whether the genesis block is already written.
 	if genesis != nil {
-		block, _, err1 := GenesisToBlock(genesis, tmpDir)
+		block, _, err1 := GenesisToBlock(genesis, tmpDir, logger)
 		if err1 != nil {
 			return genesis.Config, nil, err1
 		}
@@ -182,15 +203,11 @@ func WriteGenesisBlock(tx kv.RwTx, genesis *types.Genesis, overrideCancunTime, o
 		applyOverrides(newCfg)
 	}
 
-	// Special case: temporal fix for optimism mainnet database which contains incorrect chainspec.
-	// If london block number is set to previous wrong chainspec, overwrite with correct chainspec.
-	// Following code will be removed after we are confident that previous dbs are all corrected.
-	// https://github.com/testinprod-io/op-erigon/issues/71
-	if storedCfg.ChainName == networkname.OPMainnetChainName &&
-		newCfg.ChainName == networkname.OPMainnetChainName &&
-		storedCfg.LondonBlock.Uint64() == 3950000 &&
-		newCfg.LondonBlock.Uint64() == 105235063 {
-		log.Warn("Override chainconfig for Optimism Mainnet chainspec correction")
+	if newCfg.IsOptimism() {
+		if !reflect.DeepEqual(newCfg, storedCfg) {
+			log.Info("Update latest chain config from superchain registry")
+		}
+		// rewrite using superchain config just in case
 		if err := rawdb.WriteChainConfig(tx, storedHash, newCfg); err != nil {
 			return newCfg, nil, err
 		}
@@ -212,8 +229,8 @@ func WriteGenesisBlock(tx kv.RwTx, genesis *types.Genesis, overrideCancunTime, o
 	return newCfg, storedBlock, nil
 }
 
-func WriteGenesisState(g *types.Genesis, tx kv.RwTx, tmpDir string) (*types.Block, *state.IntraBlockState, error) {
-	block, statedb, err := GenesisToBlock(g, tmpDir)
+func WriteGenesisState(g *types.Genesis, tx kv.RwTx, tmpDir string, logger log.Logger) (*types.Block, *state.IntraBlockState, error) {
+	block, statedb, err := GenesisToBlock(g, tmpDir, logger)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -223,7 +240,7 @@ func WriteGenesisState(g *types.Genesis, tx kv.RwTx, tmpDir string) (*types.Bloc
 	}
 
 	var stateWriter state.StateWriter
-	if ethconfig.EnableHistoryV4InTest {
+	if config3.EnableHistoryV4InTest {
 		panic("implement me")
 		//tx.(*temporal.Tx).Agg().SetTxNum(0)
 		//stateWriter = state.NewWriterV4(tx.(kv.TemporalTx))
@@ -261,13 +278,13 @@ func WriteGenesisState(g *types.Genesis, tx kv.RwTx, tmpDir string) (*types.Bloc
 	}
 	return block, statedb, nil
 }
-func MustCommitGenesis(g *types.Genesis, db kv.RwDB, tmpDir string) *types.Block {
+func MustCommitGenesis(g *types.Genesis, db kv.RwDB, tmpDir string, logger log.Logger) *types.Block {
 	tx, err := db.BeginRw(context.Background())
 	if err != nil {
 		panic(err)
 	}
 	defer tx.Rollback()
-	block, _, err := write(tx, g, tmpDir)
+	block, _, err := write(tx, g, tmpDir, logger)
 	if err != nil {
 		panic(err)
 	}
@@ -280,8 +297,8 @@ func MustCommitGenesis(g *types.Genesis, db kv.RwDB, tmpDir string) *types.Block
 
 // Write writes the block and state of a genesis specification to the database.
 // The block is committed as the canonical head block.
-func write(tx kv.RwTx, g *types.Genesis, tmpDir string) (*types.Block, *state.IntraBlockState, error) {
-	block, statedb, err2 := WriteGenesisState(g, tx, tmpDir)
+func write(tx kv.RwTx, g *types.Genesis, tmpDir string, logger log.Logger) (*types.Block, *state.IntraBlockState, error) {
+	block, statedb, err2 := WriteGenesisState(g, tx, tmpDir, logger)
 	if err2 != nil {
 		return block, statedb, err2
 	}
@@ -341,9 +358,9 @@ func write(tx kv.RwTx, g *types.Genesis, tmpDir string) (*types.Block, *state.In
 }
 
 // GenesisBlockForTesting creates and writes a block in which addr has the given wei balance.
-func GenesisBlockForTesting(db kv.RwDB, addr libcommon.Address, balance *big.Int, tmpDir string) *types.Block {
+func GenesisBlockForTesting(db kv.RwDB, addr libcommon.Address, balance *big.Int, tmpDir string, logger log.Logger) *types.Block {
 	g := types.Genesis{Alloc: types.GenesisAlloc{addr: {Balance: balance}}, Config: params.TestChainConfig}
-	block := MustCommitGenesis(&g, db, tmpDir)
+	block := MustCommitGenesis(&g, db, tmpDir, logger)
 	return block
 }
 
@@ -352,14 +369,14 @@ type GenAccount struct {
 	Balance *big.Int
 }
 
-func GenesisWithAccounts(db kv.RwDB, accs []GenAccount, tmpDir string) *types.Block {
+func GenesisWithAccounts(db kv.RwDB, accs []GenAccount, tmpDir string, logger log.Logger) *types.Block {
 	g := types.Genesis{Config: params.TestChainConfig}
 	allocs := make(map[libcommon.Address]types.GenesisAccount)
 	for _, acc := range accs {
 		allocs[acc.Addr] = types.GenesisAccount{Balance: acc.Balance}
 	}
 	g.Alloc = allocs
-	block := MustCommitGenesis(&g, db, tmpDir)
+	block := MustCommitGenesis(&g, db, tmpDir, logger)
 	return block
 }
 
@@ -412,6 +429,7 @@ func GoerliGenesisBlock() *types.Genesis {
 	}
 }
 
+// MumbaiGenesisBlock returns the Amoy network genesis block.
 func MumbaiGenesisBlock() *types.Genesis {
 	return &types.Genesis{
 		Config:     params.MumbaiChainConfig,
@@ -422,6 +440,20 @@ func MumbaiGenesisBlock() *types.Genesis {
 		Mixhash:    libcommon.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000000"),
 		Coinbase:   libcommon.HexToAddress("0x0000000000000000000000000000000000000000"),
 		Alloc:      readPrealloc("allocs/mumbai.json"),
+	}
+}
+
+// AmoyGenesisBlock returns the Amoy network genesis block.
+func AmoyGenesisBlock() *types.Genesis {
+	return &types.Genesis{
+		Config:     params.AmoyChainConfig,
+		Nonce:      0,
+		Timestamp:  1700225065,
+		GasLimit:   10000000,
+		Difficulty: big.NewInt(1),
+		Mixhash:    libcommon.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000000"),
+		Coinbase:   libcommon.HexToAddress("0x0000000000000000000000000000000000000000"),
+		Alloc:      readPrealloc("allocs/amoy.json"),
 	}
 }
 
@@ -519,7 +551,7 @@ func DeveloperGenesisBlock(period uint64, faucet libcommon.Address) *types.Genes
 
 // ToBlock creates the genesis block and writes state of a genesis specification
 // to the given database (or discards it if nil).
-func GenesisToBlock(g *types.Genesis, tmpDir string) (*types.Block, *state.IntraBlockState, error) {
+func GenesisToBlock(g *types.Genesis, tmpDir string, logger log.Logger) (*types.Block, *state.IntraBlockState, error) {
 	_ = g.Alloc //nil-check
 
 	head := &types.Header{
@@ -585,7 +617,8 @@ func GenesisToBlock(g *types.Genesis, tmpDir string) (*types.Block, *state.Intra
 	go func() { // we may run inside write tx, can't open 2nd write tx in same goroutine
 		// TODO(yperbasis): use memdb.MemoryMutation instead
 		defer wg.Done()
-		genesisTmpDB := mdbx.NewMDBX(log.New()).InMem(tmpDir).MapSize(2 * datasize.GB).GrowthStep(1 * datasize.MB).MustOpen()
+
+		genesisTmpDB := mdbx.NewMDBX(logger).InMem(tmpDir).MapSize(2 * datasize.GB).GrowthStep(1 * datasize.MB).MustOpen()
 		defer genesisTmpDB.Close()
 		var tx kv.RwTx
 		if tx, err = genesisTmpDB.BeginRw(context.Background()); err != nil {
@@ -708,6 +741,8 @@ func GenesisBlockByChainName(chain string) *types.Genesis {
 		return GoerliGenesisBlock()
 	case networkname.MumbaiChainName:
 		return MumbaiGenesisBlock()
+	case networkname.AmoyChainName:
+		return AmoyGenesisBlock()
 	case networkname.BorMainnetChainName:
 		return BorMainnetGenesisBlock()
 	case networkname.BorDevnetChainName:
@@ -791,7 +826,7 @@ func loadOPStackGenesisByChainName(name string) (*types.Genesis, error) {
 		genesis.StateHash = (*libcommon.Hash)(gen.StateHash)
 	}
 
-	genesisBlock, _, err := GenesisToBlock(genesis, "")
+	genesisBlock, _, err := GenesisToBlock(genesis, "", log.Root())
 	if err != nil {
 		return nil, fmt.Errorf("failed to build genesis block: %w", err)
 	}
@@ -804,8 +839,6 @@ func loadOPStackGenesisByChainName(name string) (*types.Genesis, error) {
 		switch opStackChainCfg.ChainID {
 		case params.OPMainnetChainID:
 			expectedHash = params.OPMainnetGenesisHash
-		case params.OPGoerliChainID:
-			expectedHash = params.OPGoerliGenesisHash
 		default:
 			return nil, fmt.Errorf("unknown stateless genesis definition for chain %d", opStackChainCfg.ChainID)
 		}

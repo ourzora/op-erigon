@@ -44,6 +44,8 @@ type Dirs struct {
 	Downloader      string
 	TxPool          string
 	Nodes           string
+	CaplinBlobs     string
+	CaplinIndexing  string
 }
 
 func New(datadir string) Dirs {
@@ -70,10 +72,13 @@ func New(datadir string) Dirs {
 		Downloader:      filepath.Join(datadir, "downloader"),
 		TxPool:          filepath.Join(datadir, "txpool"),
 		Nodes:           filepath.Join(datadir, "nodes"),
+		CaplinBlobs:     filepath.Join(datadir, "caplin", "blobs"),
+		CaplinIndexing:  filepath.Join(datadir, "caplin", "indexing"),
 	}
+
 	dir.MustExist(dirs.Chaindata, dirs.Tmp,
 		dirs.SnapIdx, dirs.SnapHistory, dirs.SnapDomain, dirs.SnapAccessors,
-		dirs.Downloader, dirs.TxPool, dirs.Nodes)
+		dirs.Downloader, dirs.TxPool, dirs.Nodes, dirs.CaplinBlobs, dirs.CaplinIndexing)
 	return dirs
 }
 
@@ -146,7 +151,7 @@ func downloaderV2Migration(dirs Dirs) error {
 
 // nolint
 func moveFiles(from, to string, ext string) error {
-	files, err := os.ReadDir(from)
+	files, err := dir.ReadDir(from)
 	if err != nil {
 		return fmt.Errorf("ReadDir: %w, %s", err, from)
 	}

@@ -9,11 +9,10 @@ import (
 	"time"
 
 	mapset "github.com/deckarep/golang-set/v2"
-	"github.com/ledgerwatch/erigon-lib/chain"
-	libcommon "github.com/ledgerwatch/erigon-lib/common"
-	"github.com/ledgerwatch/erigon/turbo/services"
 	"github.com/ledgerwatch/log/v3"
 
+	"github.com/ledgerwatch/erigon-lib/chain"
+	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon/common/debug"
 	"github.com/ledgerwatch/erigon/consensus"
@@ -23,19 +22,19 @@ import (
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/eth/ethutils"
 	"github.com/ledgerwatch/erigon/params"
+	"github.com/ledgerwatch/erigon/turbo/services"
 )
 
 type MiningBlock struct {
-	Header      *types.Header
-	Uncles      []*types.Header
-	Txs         types.Transactions
-	Receipts    types.Receipts
-	Withdrawals []*types.Withdrawal
-	PreparedTxs types.TransactionsStream
+	ParentHeaderTime uint64
+	Header           *types.Header
+	Uncles           []*types.Header
+	Txs              types.Transactions
+	Receipts         types.Receipts
+	Withdrawals      []*types.Withdrawal
+	PreparedTxs      types.TransactionsStream
 
-	ForceTxs  types.TransactionsStream
-	LocalTxs  types.TransactionsStream
-	RemoteTxs types.TransactionsStream
+	ForceTxs types.TransactionsStream
 }
 
 type MiningState struct {
@@ -133,7 +132,7 @@ func SpawnMiningCreateBlockStage(s *StageState, tx kv.RwTx, cfg MiningCreateBloc
 				if err = stages.SaveStageProgress(tx, stages.MiningExecution, executionAt); err != nil {
 					return err
 				}
-				s.state.UnwindTo(expectedExecutionAt, libcommon.Hash{})
+				s.state.UnwindTo(expectedExecutionAt, OPReorgToAncestor)
 				return nil
 			}
 			executionAt = expectedExecutionAt
@@ -162,7 +161,7 @@ func SpawnMiningCreateBlockStage(s *StageState, tx kv.RwTx, cfg MiningCreateBloc
 			return err
 		}
 	}
-	chain := ChainReader{Cfg: cfg.chainConfig, Db: tx, BlockReader: cfg.blockReader}
+	chain := ChainReader{Cfg: cfg.chainConfig, Db: tx, BlockReader: cfg.blockReader, Logger: logger}
 	var GetBlocksFromHash = func(hash libcommon.Hash, n int) (blocks []*types.Block) {
 		number := rawdb.ReadHeaderNumber(tx, hash)
 		if number == nil {
@@ -234,6 +233,7 @@ func SpawnMiningCreateBlockStage(s *StageState, tx kv.RwTx, cfg MiningCreateBloc
 		header.MixDigest = cfg.blockBuilderParameters.PrevRandao
 		header.ParentBeaconBlockRoot = cfg.blockBuilderParameters.ParentBeaconBlockRoot
 
+		current.ParentHeaderTime = parent.Time
 		current.Header = header
 		current.Uncles = nil
 		current.Withdrawals = cfg.blockBuilderParameters.Withdrawals

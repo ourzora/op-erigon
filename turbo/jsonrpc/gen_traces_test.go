@@ -40,7 +40,7 @@ func TestGeneratedDebugApi(t *testing.T) {
 		t.Errorf("debug_traceBlock %d: %v", 0, err)
 	}
 	if err = stream.Flush(); err != nil {
-		t.Fatalf("error flusing: %v", err)
+		t.Fatalf("error flushing: %v", err)
 	}
 	var result interface{}
 	if err = json.Unmarshal(buf.Bytes(), &result); err != nil {
@@ -49,6 +49,7 @@ func TestGeneratedDebugApi(t *testing.T) {
 	expectedJSON := `
 	[
 		{
+		  "txHash": "0xb42edc1d46932ef34be0ba49402dc94e3d2319c066f02945f6828cd344fcfa7b",
 		  "result": {
 			"calls": [
 			  {
@@ -95,7 +96,7 @@ func TestGeneratedDebugApi(t *testing.T) {
 			  }
 			],
 			"from": "0x71562b71999873db5b286df957af199ec94617f7",
-			"gas": "0x7120",
+			"gas": "0xc350",
 			"gasUsed": "0x684c",
 			"input": "0x01000100",
 			"to": "0x00000000000000000000000000000000000002ff",
@@ -119,7 +120,7 @@ func TestGeneratedTraceApi(t *testing.T) {
 	stateCache := kvcache.New(kvcache.DefaultCoherentConfig)
 	baseApi := NewBaseApi(nil, stateCache, m.BlockReader, agg, false, rpccfg.DefaultEvmCallTimeout, m.Engine, m.Dirs, nil, nil)
 	api := NewTraceAPI(baseApi, m.DB, &httpcfg.HttpCfg{})
-	traces, err := api.Block(context.Background(), rpc.BlockNumber(1), new(bool))
+	traces, err := api.Block(context.Background(), rpc.BlockNumber(1), new(bool), nil)
 	if err != nil {
 		t.Errorf("trace_block %d: %v", 0, err)
 	}
@@ -274,7 +275,7 @@ func TestGeneratedTraceApi(t *testing.T) {
 func TestGeneratedTraceApiCollision(t *testing.T) {
 	m := rpcdaemontest.CreateTestSentryForTracesCollision(t)
 	api := NewTraceAPI(newBaseApiForTest(m), m.DB, &httpcfg.HttpCfg{})
-	traces, err := api.Transaction(context.Background(), common.HexToHash("0xb2b9fa4c999c1c8370ce1fbd1c4315a9ce7f8421fe2ebed8a9051ff2e4e7e3da"), new(bool))
+	traces, err := api.Transaction(context.Background(), common.HexToHash("0xb2b9fa4c999c1c8370ce1fbd1c4315a9ce7f8421fe2ebed8a9051ff2e4e7e3da"), new(bool), nil)
 	if err != nil {
 		t.Errorf("trace_block %d: %v", 0, err)
 	}

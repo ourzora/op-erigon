@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 	"strings"
 
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
+	"github.com/ledgerwatch/erigon-lib/common/dir"
 
 	"github.com/ledgerwatch/erigon/crypto"
 	"github.com/ledgerwatch/log/v3"
@@ -24,7 +24,7 @@ var ErrInvalidEnodeString = errors.New("invalid enode string")
 func ClearDevDB(dataDir string, logger log.Logger) error {
 	logger.Info("Deleting nodes' data folders")
 
-	files, err := ioutil.ReadDir(dataDir)
+	files, err := dir.ReadDir(dataDir)
 
 	if err != nil {
 		return err

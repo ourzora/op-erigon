@@ -26,11 +26,11 @@ import (
 	"strings"
 
 	"github.com/holiman/uint256"
+	"github.com/ledgerwatch/erigon-lib/config3"
 	"golang.org/x/crypto/sha3"
 
 	"github.com/ledgerwatch/erigon-lib/chain"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
-	"github.com/ledgerwatch/erigon-lib/common/fixedgas"
 	"github.com/ledgerwatch/erigon-lib/common/hexutility"
 	"github.com/ledgerwatch/erigon-lib/common/length"
 	"github.com/ledgerwatch/erigon-lib/kv"
@@ -43,10 +43,10 @@ import (
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/core/vm"
 	"github.com/ledgerwatch/erigon/crypto"
-	"github.com/ledgerwatch/erigon/eth/ethconfig"
 	"github.com/ledgerwatch/erigon/rlp"
 	"github.com/ledgerwatch/erigon/turbo/rpchelper"
 	"github.com/ledgerwatch/erigon/turbo/trie"
+	"github.com/ledgerwatch/log/v3"
 )
 
 // StateTest checks transaction processing without block context.
@@ -183,7 +183,7 @@ func (t *StateTest) RunNoVerify(tx kv.RwTx, subtest StateSubtest, vmconfig vm.Co
 		return nil, libcommon.Hash{}, UnsupportedForkError{subtest.Fork}
 	}
 	vmconfig.ExtraEips = eips
-	block, _, err := core.GenesisToBlock(t.genesis(config), "")
+	block, _, err := core.GenesisToBlock(t.genesis(config), "", log.Root())
 	if err != nil {
 		return nil, libcommon.Hash{}, UnsupportedForkError{subtest.Fork}
 	}
@@ -200,7 +200,7 @@ func (t *StateTest) RunNoVerify(tx kv.RwTx, subtest StateSubtest, vmconfig vm.Co
 	statedb := state.New(r)
 
 	var w state.StateWriter
-	if ethconfig.EnableHistoryV4InTest {
+	if config3.EnableHistoryV4InTest {
 		panic("implement me")
 	} else {
 		w = state.NewPlainStateWriter(tx, nil, writeBlockNr)
@@ -221,7 +221,7 @@ func (t *StateTest) RunNoVerify(tx kv.RwTx, subtest StateSubtest, vmconfig vm.Co
 		return nil, libcommon.Hash{}, err
 	}
 	if len(post.Tx) != 0 {
-		txn, err := types.UnmarshalTransactionFromBinary(post.Tx)
+		txn, err := types.UnmarshalTransactionFromBinary(post.Tx, false /* blobTxnsAreWrappedWithBlobs */)
 		if err != nil {
 			return nil, libcommon.Hash{}, err
 		}
@@ -249,7 +249,7 @@ func (t *StateTest) RunNoVerify(tx kv.RwTx, subtest StateSubtest, vmconfig vm.Co
 	// Execute the message.
 	snapshot := statedb.Snapshot()
 	gaspool := new(core.GasPool)
-	gaspool.AddGas(block.GasLimit()).AddBlobGas(fixedgas.MaxBlobGasPerBlock)
+	gaspool.AddGas(block.GasLimit()).AddBlobGas(config.GetMaxBlobGasPerBlock())
 	if _, err = core.ApplyMessage(evm, msg, gaspool, true /* refunds */, false /* gasBailout */); err != nil {
 		statedb.RevertToSnapshot(snapshot)
 	}
@@ -265,8 +265,8 @@ func (t *StateTest) RunNoVerify(tx kv.RwTx, subtest StateSubtest, vmconfig vm.Co
 	if err != nil {
 		return nil, libcommon.Hash{}, err
 	}
-	h := common.NewHasher()
-	defer common.ReturnHasherToPool(h)
+	h := libcommon.NewHasher()
+	defer libcommon.ReturnHasherToPool(h)
 	for k, v, err := c.First(); k != nil; k, v, err = c.Next() {
 		if err != nil {
 			return nil, libcommon.Hash{}, fmt.Errorf("interate over plain state: %w", err)
@@ -289,11 +289,11 @@ func (t *StateTest) RunNoVerify(tx kv.RwTx, subtest StateSubtest, vmconfig vm.Co
 			h.Sha.Write(k[length.Addr+length.Incarnation:])
 			//nolint:errcheck
 			h.Sha.Read(newK[length.Hash+length.Incarnation:])
-			if err = tx.Put(kv.HashedStorage, newK, common.CopyBytes(v)); err != nil {
+			if err = tx.Put(kv.HashedStorage, newK, libcommon.CopyBytes(v)); err != nil {
 				return nil, libcommon.Hash{}, fmt.Errorf("insert hashed key: %w", err)
 			}
 		} else {
-			if err = tx.Put(kv.HashedAccounts, newK, common.CopyBytes(v)); err != nil {
+			if err = tx.Put(kv.HashedAccounts, newK, libcommon.CopyBytes(v)); err != nil {
 				return nil, libcommon.Hash{}, fmt.Errorf("insert hashed key: %w", err)
 			}
 		}
@@ -336,7 +336,7 @@ func MakePreState(rules *chain.Rules, tx kv.RwTx, accounts types.GenesisAlloc, b
 	}
 
 	var w state.StateWriter
-	if ethconfig.EnableHistoryV4InTest {
+	if config3.EnableHistoryV4InTest {
 		panic("implement me")
 	} else {
 		w = state.NewPlainStateWriter(tx, nil, blockNr+1)

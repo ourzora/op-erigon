@@ -22,19 +22,19 @@ import (
 	"fmt"
 	"unsafe"
 
-	"github.com/VictoriaMetrics/metrics"
 	"github.com/ledgerwatch/erigon-lib/kv/iter"
 	"github.com/ledgerwatch/erigon-lib/kv/order"
+	"github.com/ledgerwatch/erigon-lib/metrics"
 )
 
 //Variables Naming:
 //  tx - Database Transaction
-//  txn - Ethereum Transaction (and TxNum - is also number of Etherum Transaction)
-//  blockNum - Ethereum block number - same across all nodes. blockID - auto-increment ID - which can be differrent across all nodes
+//  txn - Ethereum Transaction (and TxNum - is also number of Ethereum Transaction)
+//  blockNum - Ethereum block number - same across all nodes. blockID - auto-increment ID - which can be different across all nodes
 //  txNum/txID - same
 //  RoTx - Read-Only Database Transaction. RwTx - read-write
 //  k, v - key, value
-//  ts - TimeStamp. Usually it's Etherum's TransactionNumber (auto-increment ID). Or BlockNumber.
+//  ts - TimeStamp. Usually it's Ethereum's TransactionNumber (auto-increment ID). Or BlockNumber.
 //  Cursor - low-level mdbx-tide api to navigate over Table
 //  Iter - high-level iterator-like api over Table/InvertedIndex/History/Domain. Has less features than Cursor. See package `iter`.
 
@@ -60,11 +60,11 @@ import (
 //
 // MediumLevel:
 //    1. TemporalDB - abstracting DB+Snapshots. Target is:
-//         - provide 'time-travel' API for data: consistan snapshot of data as of given Timestamp.
+//         - provide 'time-travel' API for data: consistent snapshot of data as of given Timestamp.
 //         - auto-close iterators on Commit/Rollback
-//         - auto-open/close agg.MakeContext() on Begin/Commit/Rollback
+//         - auto-open/close agg.BeginFilesRo() on Begin/Commit/Rollback
 //         - to keep DB small - only for Hot/Recent data (can be update/delete by re-org).
-//         - And TemporalRoTx/TemporalRwTx actaully open Read-Only files view (MakeContext) - no concept of "Read-Write view of snapshot files".
+//         - And TemporalRoTx/TemporalRwTx actually open Read-Only files view (BeginFilesRo) - no concept of "Read-Write view of snapshot files".
 //         - using next entities:
 //               - InvertedIndex: supports range-scans
 //               - History: can return value of key K as of given TimeStamp. Doesn't know about latest/current
@@ -83,11 +83,11 @@ const Unlim int = -1
 var (
 	ErrAttemptToDeleteNonDeprecatedBucket = errors.New("only buckets from dbutils.ChaindataDeprecatedTables can be deleted")
 
-	DbSize    = metrics.GetOrCreateCounter(`db_size`)    //nolint
-	TxLimit   = metrics.GetOrCreateCounter(`tx_limit`)   //nolint
-	TxSpill   = metrics.GetOrCreateCounter(`tx_spill`)   //nolint
-	TxUnspill = metrics.GetOrCreateCounter(`tx_unspill`) //nolint
-	TxDirty   = metrics.GetOrCreateCounter(`tx_dirty`)   //nolint
+	DbSize    = metrics.GetOrCreateGauge(`db_size`)    //nolint
+	TxLimit   = metrics.GetOrCreateGauge(`tx_limit`)   //nolint
+	TxSpill   = metrics.GetOrCreateGauge(`tx_spill`)   //nolint
+	TxUnspill = metrics.GetOrCreateGauge(`tx_unspill`) //nolint
+	TxDirty   = metrics.GetOrCreateGauge(`tx_dirty`)   //nolint
 
 	DbCommitPreparation = metrics.GetOrCreateSummary(`db_commit_seconds{phase="preparation"}`) //nolint
 	//DbGCWallClock       = metrics.GetOrCreateSummary(`db_commit_seconds{phase="gc_wall_clock"}`) //nolint
@@ -98,14 +98,14 @@ var (
 	DbCommitEnding = metrics.GetOrCreateSummary(`db_commit_seconds{phase="ending"}`) //nolint
 	DbCommitTotal  = metrics.GetOrCreateSummary(`db_commit_seconds{phase="total"}`)  //nolint
 
-	DbPgopsNewly   = metrics.GetOrCreateCounter(`db_pgops{phase="newly"}`)   //nolint
-	DbPgopsCow     = metrics.GetOrCreateCounter(`db_pgops{phase="cow"}`)     //nolint
-	DbPgopsClone   = metrics.GetOrCreateCounter(`db_pgops{phase="clone"}`)   //nolint
-	DbPgopsSplit   = metrics.GetOrCreateCounter(`db_pgops{phase="split"}`)   //nolint
-	DbPgopsMerge   = metrics.GetOrCreateCounter(`db_pgops{phase="merge"}`)   //nolint
-	DbPgopsSpill   = metrics.GetOrCreateCounter(`db_pgops{phase="spill"}`)   //nolint
-	DbPgopsUnspill = metrics.GetOrCreateCounter(`db_pgops{phase="unspill"}`) //nolint
-	DbPgopsWops    = metrics.GetOrCreateCounter(`db_pgops{phase="wops"}`)    //nolint
+	DbPgopsNewly   = metrics.GetOrCreateGauge(`db_pgops{phase="newly"}`)   //nolint
+	DbPgopsCow     = metrics.GetOrCreateGauge(`db_pgops{phase="cow"}`)     //nolint
+	DbPgopsClone   = metrics.GetOrCreateGauge(`db_pgops{phase="clone"}`)   //nolint
+	DbPgopsSplit   = metrics.GetOrCreateGauge(`db_pgops{phase="split"}`)   //nolint
+	DbPgopsMerge   = metrics.GetOrCreateGauge(`db_pgops{phase="merge"}`)   //nolint
+	DbPgopsSpill   = metrics.GetOrCreateGauge(`db_pgops{phase="spill"}`)   //nolint
+	DbPgopsUnspill = metrics.GetOrCreateGauge(`db_pgops{phase="unspill"}`) //nolint
+	DbPgopsWops    = metrics.GetOrCreateGauge(`db_pgops{phase="wops"}`)    //nolint
 	/*
 		DbPgopsPrefault = metrics.NewCounter(`db_pgops{phase="prefault"}`) //nolint
 		DbPgopsMinicore = metrics.NewCounter(`db_pgops{phase="minicore"}`) //nolint
@@ -139,9 +139,9 @@ var (
 	//DbGcSelfPnlMergeVolume = metrics.NewCounter(`db_gc_pnl{phase="self_merge_volume"}`)               //nolint
 	//DbGcSelfPnlMergeCalls  = metrics.NewCounter(`db_gc_pnl{phase="slef_merge_calls"}`)                //nolint
 
-	GcLeafMetric     = metrics.GetOrCreateCounter(`db_gc_leaf`)     //nolint
-	GcOverflowMetric = metrics.GetOrCreateCounter(`db_gc_overflow`) //nolint
-	GcPagesMetric    = metrics.GetOrCreateCounter(`db_gc_pages`)    //nolint
+	GcLeafMetric     = metrics.GetOrCreateGauge(`db_gc_leaf`)     //nolint
+	GcOverflowMetric = metrics.GetOrCreateGauge(`db_gc_overflow`) //nolint
+	GcPagesMetric    = metrics.GetOrCreateGauge(`db_gc_pages`)    //nolint
 
 )
 
@@ -149,12 +149,13 @@ type DBVerbosityLvl int8
 type Label uint8
 
 const (
-	ChainDB      Label = 0
-	TxPoolDB     Label = 1
-	SentryDB     Label = 2
-	ConsensusDB  Label = 3
-	DownloaderDB Label = 4
-	InMem        Label = 5
+	ChainDB       Label = 0
+	TxPoolDB      Label = 1
+	SentryDB      Label = 2
+	ConsensusDB   Label = 3
+	DownloaderDB  Label = 4
+	InMem         Label = 5
+	DiagnosticsDB Label = 6
 )
 
 func (l Label) String() string {
@@ -171,6 +172,8 @@ func (l Label) String() string {
 		return "downloader"
 	case InMem:
 		return "inMem"
+	case DiagnosticsDB:
+		return "diagnostics"
 	default:
 		return "unknown"
 	}
@@ -189,6 +192,8 @@ func UnmarshalLabel(s string) Label {
 		return DownloaderDB
 	case "inMem":
 		return InMem
+	case "diagnostics":
+		return DiagnosticsDB
 	default:
 		panic(fmt.Sprintf("unexpected label: %s", s))
 	}
@@ -256,6 +261,9 @@ type RoDB interface {
 	BeginRo(ctx context.Context) (Tx, error)
 	AllTables() TableCfg
 	PageSize() uint64
+
+	// Pointer to the underlying C environment handle, if applicable (e.g. *C.MDBX_env)
+	CHandle() unsafe.Pointer
 }
 
 // RwDB low-level database interface - main target is - to provide common abstraction over top of MDBX and RemoteKV.
@@ -303,8 +311,6 @@ type StatelessReadTx interface {
 	// Sequence changes become visible outside the current write transaction after it is committed, and discarded on abort.
 	// Starts from 0.
 	ReadSequence(table string) (uint64, error)
-
-	BucketSize(table string) (uint64, error)
 }
 
 type StatelessWriteTx interface {
@@ -338,6 +344,16 @@ type StatelessWriteTx interface {
 type StatelessRwTx interface {
 	StatelessReadTx
 	StatelessWriteTx
+}
+
+// PendingMutations in-memory storage of changes
+// Later they can either be flushed to the database or abandon
+type PendingMutations interface {
+	StatelessRwTx
+	// Flush all in-memory data into `tx`
+	Flush(ctx context.Context, tx RwTx) error
+	Close()
+	BatchSize() int
 }
 
 // Tx
@@ -397,6 +413,7 @@ type Tx interface {
 
 	// Pointer to the underlying C transaction handle (e.g. *C.MDBX_txn)
 	CHandle() unsafe.Pointer
+	BucketSize(table string) (uint64, error)
 }
 
 // RwTx

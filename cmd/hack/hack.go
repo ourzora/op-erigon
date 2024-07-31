@@ -14,31 +14,32 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/pprof"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/ledgerwatch/erigon-lib/kv/dbutils"
+
 	"github.com/RoaringBitmap/roaring/roaring64"
 	"github.com/holiman/uint256"
 	"github.com/ledgerwatch/log/v3"
-	"golang.org/x/exp/slices"
 
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/hexutility"
 	"github.com/ledgerwatch/erigon-lib/common/length"
-	"github.com/ledgerwatch/erigon-lib/compress"
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon-lib/kv/kvcfg"
 	"github.com/ledgerwatch/erigon-lib/kv/mdbx"
 	"github.com/ledgerwatch/erigon-lib/kv/temporal/historyv2"
 	"github.com/ledgerwatch/erigon-lib/recsplit"
 	"github.com/ledgerwatch/erigon-lib/recsplit/eliasfano32"
+	"github.com/ledgerwatch/erigon-lib/seg"
 
 	hackdb "github.com/ledgerwatch/erigon/cmd/hack/db"
 	"github.com/ledgerwatch/erigon/cmd/hack/flow"
 	"github.com/ledgerwatch/erigon/cmd/hack/tool"
 	"github.com/ledgerwatch/erigon/common"
-	"github.com/ledgerwatch/erigon/common/dbutils"
 	"github.com/ledgerwatch/erigon/common/paths"
 	"github.com/ledgerwatch/erigon/core"
 	"github.com/ledgerwatch/erigon/core/rawdb"
@@ -138,7 +139,7 @@ func blocksIO(db kv.RoDB) (services.FullBlockReader, *blockio.BlockWriter) {
 	}); err != nil {
 		panic(err)
 	}
-	br := freezeblocks.NewBlockReader(freezeblocks.NewRoSnapshots(ethconfig.BlocksFreezing{Enabled: false}, "", log.New()), nil /* BorSnapshots */)
+	br := freezeblocks.NewBlockReader(freezeblocks.NewRoSnapshots(ethconfig.BlocksFreezing{Enabled: false}, "", 0, log.New()), nil /* BorSnapshots */)
 	bw := blockio.NewBlockWriter(histV3)
 	return br, bw
 }
@@ -421,7 +422,7 @@ func iterateOverCode(chaindata string) error {
 		if err := tx.ForEach(kv.Code, nil, func(k, v []byte) error {
 			if len(v) > 0 && v[0] == 0xef {
 				fmt.Printf("Found code with hash %x: %x\n", k, v)
-				hashes[libcommon.BytesToHash(k)] = common.CopyBytes(v)
+				hashes[libcommon.BytesToHash(k)] = libcommon.CopyBytes(v)
 			}
 			return nil
 		}); err != nil {
@@ -538,7 +539,7 @@ func extractBodies(datadir string) error {
 		Enabled:    true,
 		KeepBlocks: true,
 		Produce:    false,
-	}, filepath.Join(datadir, "snapshots"), log.New())
+	}, filepath.Join(datadir, "snapshots"), 0, log.New())
 	snaps.ReopenFolder()
 
 	/* method Iterate was removed, need re-implement
@@ -1270,7 +1271,7 @@ func iterate(filename string, prefix string) error {
 	efFilename := filename + ".ef"
 	viFilename := filename + ".vi"
 	vFilename := filename + ".v"
-	efDecomp, err := compress.NewDecompressor(efFilename)
+	efDecomp, err := seg.NewDecompressor(efFilename)
 	if err != nil {
 		return err
 	}
@@ -1281,7 +1282,7 @@ func iterate(filename string, prefix string) error {
 	}
 	defer viIndex.Close()
 	r := recsplit.NewIndexReader(viIndex)
-	vDecomp, err := compress.NewDecompressor(vFilename)
+	vDecomp, err := seg.NewDecompressor(vFilename)
 	if err != nil {
 		return err
 	}
@@ -1300,7 +1301,10 @@ func iterate(filename string, prefix string) error {
 				txNum, _ := efIt.Next()
 				var txKey [8]byte
 				binary.BigEndian.PutUint64(txKey[:], txNum)
-				offset := r.Lookup2(txKey[:], key)
+				offset, ok := r.Lookup2(txKey[:], key)
+				if !ok {
+					continue
+				}
 				gv.Reset(offset)
 				v, _ := gv.Next(nil)
 				fmt.Printf(" %d", txNum)
@@ -1322,7 +1326,7 @@ func iterate(filename string, prefix string) error {
 }
 
 func readSeg(chaindata string) error {
-	vDecomp, err := compress.NewDecompressor(chaindata)
+	vDecomp, err := seg.NewDecompressor(chaindata)
 	if err != nil {
 		return err
 	}

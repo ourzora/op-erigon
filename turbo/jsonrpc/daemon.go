@@ -1,34 +1,36 @@
 package jsonrpc
 
 import (
+	"github.com/ledgerwatch/log/v3"
+
 	"github.com/ledgerwatch/erigon-lib/gointerfaces/txpool"
+
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon-lib/kv/kvcache"
 	libstate "github.com/ledgerwatch/erigon-lib/state"
 	"github.com/ledgerwatch/erigon/cmd/rpcdaemon/cli/httpcfg"
 	"github.com/ledgerwatch/erigon/consensus"
-	"github.com/ledgerwatch/erigon/consensus/bor"
 	"github.com/ledgerwatch/erigon/consensus/clique"
+	"github.com/ledgerwatch/erigon/polygon/bor"
 	"github.com/ledgerwatch/erigon/rpc"
 	"github.com/ledgerwatch/erigon/turbo/rpchelper"
 	"github.com/ledgerwatch/erigon/turbo/services"
-	"github.com/ledgerwatch/log/v3"
 )
 
 // APIList describes the list of available RPC apis
 func APIList(db kv.RoDB, eth rpchelper.ApiBackend, txPool txpool.TxpoolClient, mining txpool.MiningClient,
 	filters *rpchelper.Filters, stateCache kvcache.Cache,
-	blockReader services.FullBlockReader, agg *libstate.AggregatorV3, cfg httpcfg.HttpCfg, engine consensus.EngineReader,
+	blockReader services.FullBlockReader, agg *libstate.Aggregator, cfg *httpcfg.HttpCfg, engine consensus.EngineReader,
 	seqRPCService *rpc.Client, historicalRPCService *rpc.Client,
 	logger log.Logger,
 ) (list []rpc.API) {
 	base := NewBaseApi(filters, stateCache, blockReader, agg, cfg.WithDatadir, cfg.EvmCallTimeout, engine, cfg.Dirs, seqRPCService, historicalRPCService)
-	ethImpl := NewEthAPI(base, db, eth, txPool, mining, cfg.Gascap, cfg.ReturnDataLimit, logger)
+	ethImpl := NewEthAPI(base, db, eth, txPool, mining, cfg.Gascap, cfg.Feecap, cfg.ReturnDataLimit, cfg.AllowUnprotectedTxs, cfg.MaxGetProofRewindBlockCount, cfg.WebsocketSubscribeLogsChannelSize, logger)
 	erigonImpl := NewErigonAPI(base, db, eth)
 	txpoolImpl := NewTxPoolAPI(base, db, txPool)
 	netImpl := NewNetAPIImpl(eth)
 	debugImpl := NewPrivateDebugAPI(base, db, cfg.Gascap)
-	traceImpl := NewTraceAPI(base, db, &cfg)
+	traceImpl := NewTraceAPI(base, db, cfg)
 	web3Impl := NewWeb3APIImpl(eth)
 	dbImpl := NewDBAPIImpl() /* deprecated */
 	adminImpl := NewAdminAPI(eth)
@@ -52,6 +54,7 @@ func APIList(db kv.RoDB, eth rpchelper.ApiBackend, txPool txpool.TxpoolClient, m
 
 	otsImpl := NewOtterscanAPI(base, db, cfg.OtsMaxPageSize)
 	gqlImpl := NewGraphQLAPI(base, db)
+	overlayImpl := NewOverlayAPI(base, db, cfg.Gascap, cfg.OverlayGetLogsTimeout, cfg.OverlayReplayBlockTimeout, otsImpl)
 
 	if cfg.GraphQLEnabled {
 		list = append(list, rpc.API{
@@ -152,6 +155,13 @@ func APIList(db kv.RoDB, eth rpchelper.ApiBackend, txPool txpool.TxpoolClient, m
 			})
 		case "clique":
 			list = append(list, clique.NewCliqueAPI(db, engine, blockReader))
+		case "overlay":
+			list = append(list, rpc.API{
+				Namespace: "overlay",
+				Public:    true,
+				Service:   OverlayAPI(overlayImpl),
+				Version:   "1.0",
+			})
 		}
 	}
 

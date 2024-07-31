@@ -23,20 +23,22 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/ledgerwatch/erigon-lib/common/hexutil"
+	"github.com/ledgerwatch/erigon-lib/kv/temporal/temporaltest"
+
 	"github.com/holiman/uint256"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/datadir"
 	"github.com/ledgerwatch/erigon-lib/kv/memdb"
 
-	"github.com/ledgerwatch/erigon/common/hexutil"
 	"github.com/ledgerwatch/erigon/core/state"
-	"github.com/ledgerwatch/erigon/core/state/temporal"
 	"github.com/ledgerwatch/erigon/core/vm/evmtypes"
 	"github.com/ledgerwatch/erigon/params"
 	"github.com/ledgerwatch/erigon/turbo/rpchelper"
 )
 
 func TestMemoryGasCost(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		size     uint64
 		cost     uint64
@@ -92,6 +94,7 @@ func TestEIP2200(t *testing.T) {
 		i := i
 
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			t.Parallel()
 			address := libcommon.BytesToAddress([]byte("contract"))
 			_, tx := memdb.NewTestTx(t)
 
@@ -137,7 +140,8 @@ var createGasTests = []struct {
 }
 
 func TestCreateGas(t *testing.T) {
-	_, db, _ := temporal.NewTestDB(t, datadir.New(t.TempDir()), nil)
+	t.Parallel()
+	_, db, _ := temporaltest.NewTestDB(t, datadir.New(t.TempDir()))
 	for i, tt := range createGasTests {
 		address := libcommon.BytesToAddress([]byte("contract"))
 

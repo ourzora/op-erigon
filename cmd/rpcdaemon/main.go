@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -12,6 +13,9 @@ import (
 	"github.com/ledgerwatch/erigon/turbo/debug"
 	"github.com/ledgerwatch/erigon/turbo/jsonrpc"
 	"github.com/spf13/cobra"
+
+	_ "github.com/ledgerwatch/erigon/core/snaptype"        //hack
+	_ "github.com/ledgerwatch/erigon/polygon/bor/snaptype" //hack
 )
 
 func main() {
@@ -20,9 +24,11 @@ func main() {
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
 		logger := debug.SetupCobra(cmd, "sentry")
-		db, backend, txPool, mining, stateCache, blockReader, engine, ff, agg, err := cli.RemoteServices(ctx, *cfg, logger, rootCancel)
+		db, backend, txPool, mining, stateCache, blockReader, engine, ff, agg, err := cli.RemoteServices(ctx, cfg, logger, rootCancel)
 		if err != nil {
-			logger.Error("Could not connect to DB", "err", err)
+			if !errors.Is(err, context.Canceled) {
+				logger.Error("Could not connect to DB", "err", err)
+			}
 			return nil
 		}
 		defer db.Close()
@@ -54,9 +60,9 @@ func main() {
 		}
 
 		// TODO: Replace with correct consensus Engine
-		apiList := jsonrpc.APIList(db, backend, txPool, mining, ff, stateCache, blockReader, agg, *cfg, engine, seqRPCService, historicalRPCService, logger)
+		apiList := jsonrpc.APIList(db, backend, txPool, mining, ff, stateCache, blockReader, agg, cfg, engine, seqRPCService, historicalRPCService, logger)
 		rpc.PreAllocateRPCMetricLabels(apiList)
-		if err := cli.StartRpcServer(ctx, *cfg, apiList, logger); err != nil {
+		if err := cli.StartRpcServer(ctx, cfg, apiList, logger); err != nil {
 			logger.Error(err.Error())
 			return nil
 		}

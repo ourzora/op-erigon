@@ -17,12 +17,13 @@
 package chain
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/big"
-	"sort"
 	"strconv"
 
 	"github.com/ledgerwatch/erigon-lib/common"
+	"github.com/ledgerwatch/erigon-lib/common/fixedgas"
 )
 
 // Config is the core config which determines the blockchain settings.
@@ -31,8 +32,8 @@ import (
 // that any network, identified by its genesis block, can have its own
 // set of configuration options.
 type Config struct {
-	ChainName string
-	ChainID   *big.Int `json:"chainId"` // chainId identifies the current chain and is used for replay protection
+	ChainName string   `json:"chainName"` // chain name, eg: mainnet, sepolia, bor-mainnet
+	ChainID   *big.Int `json:"chainId"`   // chainId identifies the current chain and is used for replay protection
 
 	Consensus ConsensusName `json:"consensus,omitempty"` // aura, ethash or clique
 
@@ -66,22 +67,46 @@ type Config struct {
 	ShanghaiTime *big.Int `json:"shanghaiTime,omitempty"`
 	CancunTime   *big.Int `json:"cancunTime,omitempty"`
 	PragueTime   *big.Int `json:"pragueTime,omitempty"`
+	OsakaTime    *big.Int `json:"osakaTime,omitempty"`
 
 	BedrockBlock *big.Int `json:"bedrockBlock,omitempty"` // Bedrock switch block (nil = no fork, 0 = already on optimism bedrock)
 	RegolithTime *big.Int `json:"regolithTime,omitempty"` // Regolith switch time (nil = no fork, 0 = already on optimism regolith)
 	CanyonTime   *big.Int `json:"canyonTime,omitempty"`   // Canyon switch time (nil = no fork, 0 = already on optimism canyon)
+	// Delta: the Delta upgrade does not affect the execution-layer, and is thus not configurable in the chain config.
+	EcotoneTime *big.Int `json:"ecotoneTime,omitempty"` // Ecotone switch time (nil = no fork, 0 = already on optimism ecotone)
+	FjordTime   *big.Int `json:"fjordTime,omitempty"`   // Fjord switch time (nil = no fork, 0 = already on optimism fjord)
 
-	Eip1559FeeCollector           *common.Address `json:"eip1559FeeCollector,omitempty"`           // (Optional) Address where burnt EIP-1559 fees go to
-	Eip1559FeeCollectorTransition *big.Int        `json:"eip1559FeeCollectorTransition,omitempty"` // (Optional) Block from which burnt EIP-1559 fees go to the Eip1559FeeCollector
+	// Optional EIP-4844 parameters
+	MinBlobGasPrice            *uint64 `json:"minBlobGasPrice,omitempty"`
+	MaxBlobGasPerBlock         *uint64 `json:"maxBlobGasPerBlock,omitempty"`
+	TargetBlobGasPerBlock      *uint64 `json:"targetBlobGasPerBlock,omitempty"`
+	BlobGasPriceUpdateFraction *uint64 `json:"blobGasPriceUpdateFraction,omitempty"`
+
+	// (Optional) governance contract where EIP-1559 fees will be sent to that otherwise would be burnt since the London fork
+	BurntContract map[string]common.Address `json:"burntContract,omitempty"`
 
 	// Various consensus engines
-	Ethash *EthashConfig `json:"ethash,omitempty"`
-	Clique *CliqueConfig `json:"clique,omitempty"`
-	Aura   *AuRaConfig   `json:"aura,omitempty"`
-	Bor    *BorConfig    `json:"bor,omitempty"`
+	Ethash  *EthashConfig   `json:"ethash,omitempty"`
+	Clique  *CliqueConfig   `json:"clique,omitempty"`
+	Aura    *AuRaConfig     `json:"aura,omitempty"`
+	Bor     BorConfig       `json:"-"`
+	BorJSON json.RawMessage `json:"bor,omitempty"`
+
+	// For not pruning the logs of these contracts
+	// For deposit contract logs are needed by CL to validate/produce blocks.
+	// All logs should be available to a validating node through eth_getLogs
+	NoPruneContracts map[common.Address]bool `json:"noPruneContracts,omitempty"`
 
 	// Optimism config
 	Optimism *OptimismConfig `json:"optimism,omitempty"`
+}
+
+type BorConfig interface {
+	fmt.Stringer
+	IsAgra(num uint64) bool
+	GetAgraBlock() *big.Int
+	IsNapoli(num uint64) bool
+	GetNapoliBlock() *big.Int
 }
 
 // OptimismConfig is the optimism config.
@@ -99,7 +124,7 @@ func (o *OptimismConfig) String() string {
 func (c *Config) String() string {
 	engine := c.getEngine()
 
-	return fmt.Sprintf("{ChainID: %v, Homestead: %v, DAO: %v, Tangerine Whistle: %v, Spurious Dragon: %v, Byzantium: %v, Constantinople: %v, Petersburg: %v, Istanbul: %v, Muir Glacier: %v, Berlin: %v, London: %v, Arrow Glacier: %v, Gray Glacier: %v, Terminal Total Difficulty: %v, Merge Netsplit: %v, Shanghai: %v, Cancun: %v, Prague: %v, Engine: %v}",
+	configString := fmt.Sprintf("{ChainID: %v, Homestead: %v, DAO: %v, Tangerine Whistle: %v, Spurious Dragon: %v, Byzantium: %v, Constantinople: %v, Petersburg: %v, Istanbul: %v, Muir Glacier: %v, Berlin: %v, London: %v, Arrow Glacier: %v, Gray Glacier: %v, Terminal Total Difficulty: %v, Merge Netsplit: %v, Shanghai: %v, Cancun: %v, Prague: %v, Osaka: %v, Engine: %v, NoPruneContracts: %v}",
 		c.ChainID,
 		c.HomesteadBlock,
 		c.DAOForkBlock,
@@ -119,8 +144,20 @@ func (c *Config) String() string {
 		c.ShanghaiTime,
 		c.CancunTime,
 		c.PragueTime,
+		c.OsakaTime,
 		engine,
+		c.NoPruneContracts,
 	)
+	if c.IsOptimism() {
+		configString += fmt.Sprintf("{Bedrock: %v, Regolith: %v, Canyon: %v, Ecotone: %v, Fjord: %v}",
+			c.BedrockBlock,
+			c.RegolithTime,
+			c.CanyonTime,
+			c.EcotoneTime,
+			c.FjordTime,
+		)
+	}
+	return configString
 }
 
 func (c *Config) getEngine() string {
@@ -210,6 +247,19 @@ func (c *Config) IsShanghai(time uint64) bool {
 	return isForked(c.ShanghaiTime, time)
 }
 
+// IsAgra returns whether num is either equal to the Agra fork block or greater.
+// The Agra hard fork is based on the Shanghai hard fork, but it doesn't include withdrawals.
+// Also Agra is activated based on the block number rather than the timestamp.
+// Refer to https://forum.polygon.technology/t/pip-28-agra-hardfork
+func (c *Config) IsAgra(num uint64) bool {
+	return (c != nil) && (c.Bor != nil) && c.Bor.IsAgra(num)
+}
+
+// Refer to https://forum.polygon.technology/t/pip-33-napoli-upgrade
+func (c *Config) IsNapoli(num uint64) bool {
+	return (c != nil) && (c.Bor != nil) && c.Bor.IsNapoli(num)
+}
+
 // IsCancun returns whether time is either equal to the Cancun fork time or greater.
 func (c *Config) IsCancun(time uint64) bool {
 	return isForked(c.CancunTime, time)
@@ -220,8 +270,49 @@ func (c *Config) IsPrague(time uint64) bool {
 	return isForked(c.PragueTime, time)
 }
 
-func (c *Config) IsEip1559FeeCollector(num uint64) bool {
-	return c.Eip1559FeeCollector != nil && isForked(c.Eip1559FeeCollectorTransition, num)
+// IsOsaka returns whether time is either equal to the Osaka fork time or greater.
+func (c *Config) IsOsaka(time uint64) bool {
+	return isForked(c.OsakaTime, time)
+}
+
+func (c *Config) GetBurntContract(num uint64) *common.Address {
+	if len(c.BurntContract) == 0 {
+		return nil
+	}
+	addr := borKeyValueConfigHelper(c.BurntContract, num)
+	return &addr
+}
+
+func (c *Config) GetMinBlobGasPrice() uint64 {
+	if c != nil && c.MinBlobGasPrice != nil {
+		return *c.MinBlobGasPrice
+	}
+	return 1 // MIN_BLOB_GASPRICE (EIP-4844)
+}
+
+func (c *Config) GetMaxBlobGasPerBlock() uint64 {
+	if c != nil && c.MaxBlobGasPerBlock != nil {
+		return *c.MaxBlobGasPerBlock
+	}
+	return 786432 // MAX_BLOB_GAS_PER_BLOCK (EIP-4844)
+}
+
+func (c *Config) GetTargetBlobGasPerBlock() uint64 {
+	if c != nil && c.TargetBlobGasPerBlock != nil {
+		return *c.TargetBlobGasPerBlock
+	}
+	return 393216 // TARGET_BLOB_GAS_PER_BLOCK (EIP-4844)
+}
+
+func (c *Config) GetBlobGasPriceUpdateFraction() uint64 {
+	if c != nil && c.BlobGasPriceUpdateFraction != nil {
+		return *c.BlobGasPriceUpdateFraction
+	}
+	return 3338477 // BLOB_GASPRICE_UPDATE_FRACTION (EIP-4844)
+}
+
+func (c *Config) GetMaxBlobsPerBlock() uint64 {
+	return c.GetMaxBlobGasPerBlock() / fixedgas.BlobGasPerBlob
 }
 
 // IsBedrock returns whether num is either equal to the Bedrock fork block or greater.
@@ -235,6 +326,14 @@ func (c *Config) IsRegolith(time uint64) bool {
 
 func (c *Config) IsCanyon(time uint64) bool {
 	return isForked(c.CanyonTime, time)
+}
+
+func (c *Config) IsEcotone(time uint64) bool {
+	return isForked(c.EcotoneTime, time)
+}
+
+func (c *Config) IsFjord(time uint64) bool {
+	return isForked(c.FjordTime, time)
 }
 
 // IsOptimism returns whether the node is an optimism node or not.
@@ -253,6 +352,14 @@ func (c *Config) IsOptimismRegolith(time uint64) bool {
 
 func (c *Config) IsOptimismCanyon(time uint64) bool {
 	return c.IsOptimism() && c.IsCanyon(time)
+}
+
+func (c *Config) IsOptimismEcotone(time uint64) bool {
+	return c.IsOptimism() && c.IsEcotone(time)
+}
+
+func (c *Config) IsOptimismFjord(time uint64) bool {
+	return c.IsOptimism() && c.IsFjord(time)
 }
 
 // IsOptimismPreBedrock returns true iff this is an optimism node & bedrock is not yet active
@@ -472,186 +579,25 @@ func (c *CliqueConfig) String() string {
 	return "clique"
 }
 
-// BorConfig is the consensus engine configs for Matic bor based sealing.
-type BorConfig struct {
-	Period                map[string]uint64 `json:"period"`                // Number of seconds between blocks to enforce
-	ProducerDelay         map[string]uint64 `json:"producerDelay"`         // Number of seconds delay between two producer interval
-	Sprint                map[string]uint64 `json:"sprint"`                // Epoch length to proposer
-	BackupMultiplier      map[string]uint64 `json:"backupMultiplier"`      // Backup multiplier to determine the wiggle time
-	ValidatorContract     string            `json:"validatorContract"`     // Validator set contract
-	StateReceiverContract string            `json:"stateReceiverContract"` // State receiver contract
-
-	OverrideStateSyncRecords map[string]int         `json:"overrideStateSyncRecords"` // override state records count
-	BlockAlloc               map[string]interface{} `json:"blockAlloc"`
-
-	JaipurBlock *big.Int `json:"jaipurBlock"` // Jaipur switch block (nil = no fork, 0 = already on jaipur)
-	DelhiBlock  *big.Int `json:"delhiBlock"`  // Delhi switch block (nil = no fork, 0 = already on delhi)
-	IndoreBlock *big.Int `json:"indoreBlock"` // Indore switch block (nil = no fork, 0 = already on indore)
-
-	StateSyncConfirmationDelay map[string]uint64 `json:"stateSyncConfirmationDelay"` // StateSync Confirmation Delay, in seconds, to calculate `to`
-
-	sprints sprints
-}
-
-// String implements the stringer interface, returning the consensus engine details.
-func (b *BorConfig) String() string {
-	return "bor"
-}
-
-func (c *BorConfig) CalculateProducerDelay(number uint64) uint64 {
-	return borKeyValueConfigHelper(c.ProducerDelay, number)
-}
-
-func (c *BorConfig) CalculateSprint(number uint64) uint64 {
-	if c.sprints == nil {
-		c.sprints = asSprints(c.Sprint)
-	}
-
-	for i := 0; i < len(c.sprints)-1; i++ {
-		if number >= c.sprints[i].from && number < c.sprints[i+1].from {
-			return c.sprints[i].size
+func borKeyValueConfigHelper[T uint64 | common.Address](field map[string]T, number uint64) T {
+	fieldUint := make(map[uint64]T)
+	for k, v := range field {
+		keyUint, err := strconv.ParseUint(k, 10, 64)
+		if err != nil {
+			panic(err)
 		}
+		fieldUint[keyUint] = v
 	}
 
-	return c.sprints[len(c.sprints)-1].size
-}
+	keys := common.SortedKeys(fieldUint)
 
-func (c *BorConfig) CalculateSprintCount(from, to uint64) int {
-	switch {
-	case from > to:
-		return 0
-	case from < to:
-		to--
-	}
-
-	if c.sprints == nil {
-		c.sprints = asSprints(c.Sprint)
-	}
-
-	count := uint64(0)
-	startCalc := from
-
-	zeroth := func(boundary uint64, size uint64) uint64 {
-		if boundary%size == 0 {
-			return 1
-		}
-
-		return 0
-	}
-
-	for i := 0; i < len(c.sprints)-1; i++ {
-		if startCalc >= c.sprints[i].from && startCalc < c.sprints[i+1].from {
-			if to >= c.sprints[i].from && to < c.sprints[i+1].from {
-				if startCalc == to {
-					return int(count + zeroth(startCalc, c.sprints[i].size))
-				}
-				return int(count + zeroth(startCalc, c.sprints[i].size) + (to-startCalc)/c.sprints[i].size)
-			} else {
-				endCalc := c.sprints[i+1].from - 1
-				count += zeroth(startCalc, c.sprints[i].size) + (endCalc-startCalc)/c.sprints[i].size
-				startCalc = endCalc + 1
-			}
-		}
-	}
-
-	if startCalc == to {
-		return int(count + zeroth(startCalc, c.sprints[len(c.sprints)-1].size))
-	}
-
-	return int(count + zeroth(startCalc, c.sprints[len(c.sprints)-1].size) + (to-startCalc)/c.sprints[len(c.sprints)-1].size)
-}
-
-func (c *BorConfig) CalculateBackupMultiplier(number uint64) uint64 {
-	return c.calcConfig(c.BackupMultiplier, number)
-}
-
-func (c *BorConfig) CalculatePeriod(number uint64) uint64 {
-	return c.calcConfig(c.Period, number)
-}
-
-func (c *BorConfig) IsJaipur(number uint64) bool {
-	return isForked(c.JaipurBlock, number)
-}
-
-func (c *BorConfig) IsDelhi(number uint64) bool {
-	return isForked(c.DelhiBlock, number)
-}
-
-func (c *BorConfig) IsIndore(number uint64) bool {
-	return isForked(c.IndoreBlock, number)
-}
-
-func (c *BorConfig) CalculateStateSyncDelay(number uint64) uint64 {
-	return borKeyValueConfigHelper(c.StateSyncConfirmationDelay, number)
-}
-
-func (c *BorConfig) calcConfig(field map[string]uint64, number uint64) uint64 {
-	keys := sortMapKeys(field)
 	for i := 0; i < len(keys)-1; i++ {
-		valUint, _ := strconv.ParseUint(keys[i], 10, 64)
-		valUintNext, _ := strconv.ParseUint(keys[i+1], 10, 64)
-		if number > valUint && number < valUintNext {
-			return field[keys[i]]
-		}
-	}
-	return field[keys[len(keys)-1]]
-}
-
-func borKeyValueConfigHelper(field map[string]uint64, number uint64) uint64 {
-	keys := sortMapKeys(field)
-	for i := 0; i < len(keys)-1; i++ {
-		valUint, _ := strconv.ParseUint(keys[i], 10, 64)
-		valUintNext, _ := strconv.ParseUint(keys[i+1], 10, 64)
-
-		if number >= valUint && number < valUintNext {
-			return field[keys[i]]
+		if number >= keys[i] && number < keys[i+1] {
+			return fieldUint[keys[i]]
 		}
 	}
 
-	return field[keys[len(keys)-1]]
-}
-
-func sortMapKeys(m map[string]uint64) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	return keys
-}
-
-type sprint struct {
-	from, size uint64
-}
-
-type sprints []sprint
-
-func (s sprints) Len() int {
-	return len(s)
-}
-
-func (s sprints) Swap(i, j int) {
-	s[i], s[j] = s[j], s[i]
-}
-
-func (s sprints) Less(i, j int) bool {
-	return s[i].from < s[j].from
-}
-
-func asSprints(configSprints map[string]uint64) sprints {
-	sprints := make(sprints, len(configSprints))
-
-	i := 0
-	for key, value := range configSprints {
-		sprints[i].from, _ = strconv.ParseUint(key, 10, 64)
-		sprints[i].size = value
-		i++
-	}
-
-	sort.Sort(sprints)
-
-	return sprints
+	return fieldUint[keys[len(keys)-1]]
 }
 
 // Rules is syntactic sugar over Config. It can be used for functions
@@ -660,12 +606,15 @@ func asSprints(configSprints map[string]uint64) sprints {
 // Rules is a one time interface meaning that it shouldn't be used in between transition
 // phases.
 type Rules struct {
-	ChainID                                                 *big.Int
-	IsHomestead, IsTangerineWhistle, IsSpuriousDragon       bool
-	IsByzantium, IsConstantinople, IsPetersburg, IsIstanbul bool
-	IsBerlin, IsLondon, IsShanghai, IsCancun, IsPrague      bool
-	IsEip1559FeeCollector, IsAura                           bool
-	IsOptimismBedrock, IsOptimismRegolith                   bool
+	ChainID                                              *big.Int
+	IsHomestead, IsTangerineWhistle, IsSpuriousDragon    bool
+	IsByzantium, IsConstantinople, IsPetersburg          bool
+	IsIstanbul, IsBerlin, IsLondon, IsShanghai           bool
+	IsCancun, IsNapoli                                   bool
+	IsPrague, IsOsaka                                    bool
+	IsAura                                               bool
+	IsOptimismBedrock, IsOptimismRegolith                bool
+	IsOptimismCanyon, IsOptimismEcotone, IsOptimismFjord bool
 }
 
 // Rules ensures c's ChainID is not nil and returns a new Rules instance
@@ -676,23 +625,27 @@ func (c *Config) Rules(num uint64, time uint64) *Rules {
 	}
 
 	return &Rules{
-		ChainID:               new(big.Int).Set(chainID),
-		IsHomestead:           c.IsHomestead(num),
-		IsTangerineWhistle:    c.IsTangerineWhistle(num),
-		IsSpuriousDragon:      c.IsSpuriousDragon(num),
-		IsByzantium:           c.IsByzantium(num),
-		IsConstantinople:      c.IsConstantinople(num),
-		IsPetersburg:          c.IsPetersburg(num),
-		IsIstanbul:            c.IsIstanbul(num),
-		IsBerlin:              c.IsBerlin(num),
-		IsLondon:              c.IsLondon(num),
-		IsShanghai:            c.IsShanghai(time),
-		IsCancun:              c.IsCancun(time),
-		IsPrague:              c.IsPrague(time),
-		IsEip1559FeeCollector: c.IsEip1559FeeCollector(num),
-		IsAura:                c.Aura != nil,
-		IsOptimismBedrock:     c.IsOptimismBedrock(num),
-		IsOptimismRegolith:    c.IsOptimismRegolith(time),
+		ChainID:            new(big.Int).Set(chainID),
+		IsHomestead:        c.IsHomestead(num),
+		IsTangerineWhistle: c.IsTangerineWhistle(num),
+		IsSpuriousDragon:   c.IsSpuriousDragon(num),
+		IsByzantium:        c.IsByzantium(num),
+		IsConstantinople:   c.IsConstantinople(num),
+		IsPetersburg:       c.IsPetersburg(num),
+		IsIstanbul:         c.IsIstanbul(num),
+		IsBerlin:           c.IsBerlin(num),
+		IsLondon:           c.IsLondon(num),
+		IsShanghai:         c.IsShanghai(time) || c.IsAgra(num),
+		IsCancun:           c.IsCancun(time),
+		IsNapoli:           c.IsNapoli(num),
+		IsPrague:           c.IsPrague(time),
+		IsOsaka:            c.IsOsaka(time),
+		IsAura:             c.Aura != nil,
+		IsOptimismBedrock:  c.IsOptimismBedrock(num),
+		IsOptimismRegolith: c.IsOptimismRegolith(time),
+		IsOptimismCanyon:   c.IsOptimismCanyon(time),
+		IsOptimismEcotone:  c.IsOptimismEcotone(time),
+		IsOptimismFjord:    c.IsOptimismFjord(time),
 	}
 }
 

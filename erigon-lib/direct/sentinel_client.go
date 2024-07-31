@@ -61,9 +61,17 @@ func (s *SentinelClientDirect) PublishGossip(ctx context.Context, in *sentinel.G
 	return s.server.PublishGossip(ctx, in)
 }
 
+func (s *SentinelClientDirect) Identity(ctx context.Context, in *sentinel.EmptyMessage, opts ...grpc.CallOption) (*sentinel.IdentityResponse, error) {
+	return s.server.Identity(ctx, in)
+}
+
+func (s *SentinelClientDirect) PeersInfo(ctx context.Context, in *sentinel.PeersInfoRequest, opts ...grpc.CallOption) (*sentinel.PeersInfoResponse, error) {
+	return s.server.PeersInfo(ctx, in)
+}
+
 // Subscribe gossip part. the only complex section of this bullshit
 
-func (s *SentinelClientDirect) SubscribeGossip(ctx context.Context, in *sentinel.EmptyMessage, opts ...grpc.CallOption) (sentinel.Sentinel_SubscribeGossipClient, error) {
+func (s *SentinelClientDirect) SubscribeGossip(ctx context.Context, in *sentinel.SubscriptionData, opts ...grpc.CallOption) (sentinel.Sentinel_SubscribeGossipClient, error) {
 	ch := make(chan *gossipReply, 16384)
 	streamServer := &SentinelSubscribeGossipS{ch: ch, ctx: ctx}
 	go func() {
@@ -71,6 +79,10 @@ func (s *SentinelClientDirect) SubscribeGossip(ctx context.Context, in *sentinel
 		streamServer.Err(s.server.SubscribeGossip(in, streamServer))
 	}()
 	return &SentinelSubscribeGossipC{ch: ch, ctx: ctx}, nil
+}
+
+func (s *SentinelClientDirect) SetSubscribeExpiry(ctx context.Context, expiryReq *sentinel.RequestSubscribeExpiry, opts ...grpc.CallOption) (*sentinel.EmptyMessage, error) {
+	return s.server.SetSubscribeExpiry(ctx, expiryReq)
 }
 
 type SentinelSubscribeGossipC struct {

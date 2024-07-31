@@ -30,13 +30,13 @@ import (
 
 	"github.com/ledgerwatch/erigon-lib/chain"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
-	"github.com/ledgerwatch/erigon-lib/common/fixedgas"
 	"github.com/ledgerwatch/erigon-lib/common/hexutility"
 	"github.com/ledgerwatch/erigon-lib/kv"
 	state2 "github.com/ledgerwatch/erigon-lib/state"
 	types2 "github.com/ledgerwatch/erigon-lib/types"
 
 	ethereum "github.com/ledgerwatch/erigon"
+	"github.com/ledgerwatch/erigon-lib/opstack"
 	"github.com/ledgerwatch/erigon/accounts/abi"
 	"github.com/ledgerwatch/erigon/accounts/abi/bind"
 	"github.com/ledgerwatch/erigon/common/math"
@@ -129,7 +129,7 @@ func NewTestSimulatedBackendWithConfig(t *testing.T, alloc types.GenesisAlloc, c
 	return b
 }
 func (b *SimulatedBackend) DB() kv.RwDB                           { return b.m.DB }
-func (b *SimulatedBackend) Agg() *state2.AggregatorV3             { return b.m.HistoryV3Components() }
+func (b *SimulatedBackend) Agg() *state2.Aggregator               { return b.m.HistoryV3Components() }
 func (b *SimulatedBackend) HistoryV3() bool                       { return b.m.HistoryV3 }
 func (b *SimulatedBackend) Engine() consensus.Engine              { return b.m.Engine }
 func (b *SimulatedBackend) BlockReader() services.FullBlockReader { return b.m.BlockReader }
@@ -177,11 +177,11 @@ func (b *SimulatedBackend) emptyPendingBlock() {
 	b.pendingBlock = blockChain.Blocks[0]
 	b.pendingReceipts = blockChain.Receipts[0]
 	b.pendingHeader = blockChain.Headers[0]
-	b.gasPool = new(core.GasPool).AddGas(b.pendingHeader.GasLimit).AddBlobGas(fixedgas.MaxBlobGasPerBlock)
+	b.gasPool = new(core.GasPool).AddGas(b.pendingHeader.GasLimit).AddBlobGas(b.m.ChainConfig.GetMaxBlobGasPerBlock())
 	if b.pendingReaderTx != nil {
 		b.pendingReaderTx.Rollback()
 	}
-	tx, err := b.m.DB.BeginRo(context.Background())
+	tx, err := b.m.DB.BeginRo(context.Background()) //nolint:gocritic
 	if err != nil {
 		panic(err)
 	}
@@ -725,7 +725,7 @@ func (b *SimulatedBackend) callContract(_ context.Context, call ethereum.CallMsg
 	txContext := core.NewEVMTxContext(msg)
 	header := block.Header()
 	evmContext := core.NewEVMBlockContext(header, core.GetHashFn(header, b.getHeader), b.m.Engine, nil)
-	evmContext.L1CostFunc = types.NewL1CostFunc(b.m.ChainConfig, statedb)
+	evmContext.L1CostFunc = opstack.NewL1CostFunc(b.m.ChainConfig, statedb)
 	// Create a new environment which holds all relevant information
 	// about the transaction and calling mechanisms.
 	vmEnv := vm.NewEVM(evmContext, txContext, statedb, b.m.ChainConfig, vm.Config{})
@@ -828,23 +828,23 @@ type callMsg struct {
 	ethereum.CallMsg
 }
 
-func (m callMsg) From() libcommon.Address            { return m.CallMsg.From }
-func (m callMsg) Nonce() uint64                      { return 0 }
-func (m callMsg) CheckNonce() bool                   { return false }
-func (m callMsg) To() *libcommon.Address             { return m.CallMsg.To }
-func (m callMsg) GasPrice() *uint256.Int             { return m.CallMsg.GasPrice }
-func (m callMsg) FeeCap() *uint256.Int               { return m.CallMsg.FeeCap }
-func (m callMsg) Tip() *uint256.Int                  { return m.CallMsg.Tip }
-func (m callMsg) Gas() uint64                        { return m.CallMsg.Gas }
-func (m callMsg) Value() *uint256.Int                { return m.CallMsg.Value }
-func (m callMsg) Data() []byte                       { return m.CallMsg.Data }
-func (m callMsg) AccessList() types2.AccessList      { return m.CallMsg.AccessList }
-func (m callMsg) IsFree() bool                       { return false }
-func (m callMsg) IsFake() bool                       { return true }
-func (m callMsg) Mint() *uint256.Int                 { return nil }
-func (m callMsg) RollupDataGas() types.RollupGasData { return types.RollupGasData{} }
-func (m callMsg) IsDepositTx() bool                  { return false }
-func (m callMsg) IsSystemTx() bool                   { return false }
+func (m callMsg) From() libcommon.Address               { return m.CallMsg.From }
+func (m callMsg) Nonce() uint64                         { return 0 }
+func (m callMsg) CheckNonce() bool                      { return false }
+func (m callMsg) To() *libcommon.Address                { return m.CallMsg.To }
+func (m callMsg) GasPrice() *uint256.Int                { return m.CallMsg.GasPrice }
+func (m callMsg) FeeCap() *uint256.Int                  { return m.CallMsg.FeeCap }
+func (m callMsg) Tip() *uint256.Int                     { return m.CallMsg.Tip }
+func (m callMsg) Gas() uint64                           { return m.CallMsg.Gas }
+func (m callMsg) Value() *uint256.Int                   { return m.CallMsg.Value }
+func (m callMsg) Data() []byte                          { return m.CallMsg.Data }
+func (m callMsg) AccessList() types2.AccessList         { return m.CallMsg.AccessList }
+func (m callMsg) IsFree() bool                          { return false }
+func (m callMsg) IsFake() bool                          { return true }
+func (m callMsg) Mint() *uint256.Int                    { return nil }
+func (m callMsg) RollupCostData() types2.RollupCostData { return types2.RollupCostData{} }
+func (m callMsg) IsDepositTx() bool                     { return false }
+func (m callMsg) IsSystemTx() bool                      { return false }
 
 func (m callMsg) BlobGas() uint64                { return misc.GetBlobGasUsed(len(m.CallMsg.BlobHashes)) }
 func (m callMsg) MaxFeePerBlobGas() *uint256.Int { return m.CallMsg.MaxFeePerBlobGas }

@@ -26,6 +26,7 @@ import (
 	"github.com/ledgerwatch/erigon-lib/chain"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon/eth/gasprice/gaspricecfg"
+	"github.com/ledgerwatch/erigon/params"
 	"github.com/ledgerwatch/log/v3"
 
 	"github.com/ledgerwatch/erigon/core/types"
@@ -62,6 +63,8 @@ type Oracle struct {
 	checkBlocks                       int
 	percentile                        int
 	maxHeaderHistory, maxBlockHistory int
+
+	minSuggestedPriorityFee *big.Int // for Optimism fee suggestion
 }
 
 // NewOracle returns a new gasprice oracle which can recommend suitable
@@ -91,7 +94,10 @@ func NewOracle(backend OracleBackend, params gaspricecfg.Config, cache Cache) *O
 		ignorePrice = gaspricecfg.DefaultIgnorePrice
 		log.Warn("Sanitizing invalid gasprice oracle ignore price", "provided", params.IgnorePrice, "updated", ignorePrice)
 	}
-	return &Oracle{
+
+	setBorDefaultGpoIgnorePrice(backend.ChainConfig(), params)
+
+	r := &Oracle{
 		backend:          backend,
 		lastPrice:        params.Default,
 		maxPrice:         maxPrice,
@@ -102,6 +108,16 @@ func NewOracle(backend OracleBackend, params gaspricecfg.Config, cache Cache) *O
 		maxHeaderHistory: params.MaxHeaderHistory,
 		maxBlockHistory:  params.MaxBlockHistory,
 	}
+	if backend.ChainConfig().IsOptimism() {
+		r.minSuggestedPriorityFee = params.MinSuggestedPriorityFee
+		if r.minSuggestedPriorityFee == nil || r.minSuggestedPriorityFee.Int64() <= 0 {
+			r.minSuggestedPriorityFee = gaspricecfg.DefaultMinSuggestedPriorityFee
+			log.Warn("Sanitizing invalid optimism gasprice oracle min priority fee suggestion",
+				"provided", params.MinSuggestedPriorityFee,
+				"updated", r.minSuggestedPriorityFee)
+		}
+	}
+	return r
 }
 
 // SuggestTipCap returns a TipCap so that newly created transaction can
@@ -127,6 +143,10 @@ func (oracle *Oracle) SuggestTipCap(ctx context.Context) (*big.Int, error) {
 	latestHead, latestPrice = oracle.cache.GetLatest()
 	if latestHead == headHash {
 		return latestPrice, nil
+	}
+
+	if oracle.backend.ChainConfig().IsOptimism() {
+		return oracle.SuggestOptimismPriorityFee(ctx, head, headHash), nil
 	}
 
 	number := head.Number.Uint64()
@@ -279,4 +299,19 @@ func (s *sortingHeap) Pop() interface{} {
 	old[n-1] = nil // avoid memory leak
 	*s = old[0 : n-1]
 	return x
+}
+
+type bigIntArray []*big.Int
+
+func (s bigIntArray) Len() int           { return len(s) }
+func (s bigIntArray) Less(i, j int) bool { return s[i].Cmp(s[j]) < 0 }
+func (s bigIntArray) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+
+// setBorDefaultGpoIgnorePrice enforces gpo IgnorePrice to be equal to BorDefaultGpoIgnorePrice (25gwei by default)
+// only for polygon amoy network.
+func setBorDefaultGpoIgnorePrice(chainConfig *chain.Config, gasPriceConfig gaspricecfg.Config) {
+	if chainConfig.Bor != nil && chainConfig.ChainID.Cmp(params.AmoyChainConfig.ChainID) == 0 && gasPriceConfig.IgnorePrice != gaspricecfg.BorDefaultGpoIgnorePrice {
+		log.Warn("Sanitizing invalid bor gasprice oracle ignore price", "provided", gasPriceConfig.IgnorePrice, "updated", gaspricecfg.BorDefaultGpoIgnorePrice)
+		gasPriceConfig.IgnorePrice = gaspricecfg.BorDefaultGpoIgnorePrice
+	}
 }

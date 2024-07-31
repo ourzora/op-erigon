@@ -13,9 +13,9 @@ import (
 
 	common2 "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/kv"
+	"github.com/ledgerwatch/erigon-lib/kv/backup"
 	mdbx2 "github.com/ledgerwatch/erigon-lib/kv/mdbx"
 	"github.com/ledgerwatch/erigon/common"
-	"github.com/ledgerwatch/erigon/turbo/backup"
 	"github.com/ledgerwatch/erigon/turbo/debug"
 	"github.com/ledgerwatch/log/v3"
 	"github.com/spf13/cobra"
@@ -160,7 +160,7 @@ func init() {
 
 func doWarmup(ctx context.Context, chaindata string, bucket string, logger log.Logger) error {
 	const ThreadsLimit = 5_000
-	db := mdbx2.NewMDBX(log.New()).Path(chaindata).RoTxsLimiter(semaphore.NewWeighted(ThreadsLimit)).MustOpen()
+	db := mdbx2.NewMDBX(log.New()).Path(chaindata).Accede().RoTxsLimiter(semaphore.NewWeighted(ThreadsLimit)).MustOpen()
 	defer db.Close()
 
 	var total uint64
@@ -389,7 +389,7 @@ MainLoop:
 			if !fileScanner.Scan() {
 				break MainLoop
 			}
-			k := common.CopyBytes(fileScanner.Bytes())
+			k := common2.CopyBytes(fileScanner.Bytes())
 			if bytes.Equal(k, endData) {
 				break
 			}
@@ -397,7 +397,7 @@ MainLoop:
 			if !fileScanner.Scan() {
 				break MainLoop
 			}
-			v := common.CopyBytes(fileScanner.Bytes())
+			v := common2.CopyBytes(fileScanner.Bytes())
 			v = common.FromHex(string(v[1:]))
 
 			if casted, ok := c.(kv.RwCursorDupSort); ok {

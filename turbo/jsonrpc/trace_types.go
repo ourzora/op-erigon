@@ -2,11 +2,11 @@ package jsonrpc
 
 import (
 	"fmt"
+	"github.com/ledgerwatch/erigon-lib/common/hexutil"
 
 	"github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/hexutility"
 
-	"github.com/ledgerwatch/erigon/common/hexutil"
 	"github.com/ledgerwatch/erigon/core/types"
 )
 
@@ -36,7 +36,7 @@ type GethTrace struct {
 // GethTraces an array of GethTraces
 type GethTraces []*GethTrace
 
-// ParityTrace A trace in the desired format (Parity/OpenEtherum) See: https://openethereum.github.io/wiki/JSONRPC-trace-module
+// ParityTrace A trace in the desired format (Parity/OpenEthereum) See: https://openethereum.github.io/wiki/JSONRPC-trace-module
 type ParityTrace struct {
 	// Do not change the ordering of these fields -- allows for easier comparison with other clients
 	Action              interface{}  `json:"action"` // Can be either CallTraceAction or CreateTraceAction

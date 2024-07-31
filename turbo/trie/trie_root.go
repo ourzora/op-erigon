@@ -8,15 +8,14 @@ import (
 	"math/bits"
 	"time"
 
-	libcommon "github.com/ledgerwatch/erigon-lib/common"
-	"github.com/ledgerwatch/erigon-lib/common/length"
-	length2 "github.com/ledgerwatch/erigon-lib/common/length"
-	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/log/v3"
 
-	"github.com/ledgerwatch/erigon/common"
-	"github.com/ledgerwatch/erigon/common/dbutils"
-	"github.com/ledgerwatch/erigon/common/hexutil"
+	libcommon "github.com/ledgerwatch/erigon-lib/common"
+	"github.com/ledgerwatch/erigon-lib/common/hexutil"
+	length2 "github.com/ledgerwatch/erigon-lib/common/length"
+	"github.com/ledgerwatch/erigon-lib/kv"
+	dbutils2 "github.com/ledgerwatch/erigon-lib/kv/dbutils"
+
 	"github.com/ledgerwatch/erigon/core/types/accounts"
 	"github.com/ledgerwatch/erigon/turbo/rlphacks"
 )
@@ -549,16 +548,16 @@ func (r *RootHashAggregator) genStructStorage() error {
 	}
 	var wantProof func(_ []byte) *proofElement
 	if r.proofRetainer != nil {
-		var fullKey [2 * (length.Hash + length.Incarnation + length.Hash)]byte
+		var fullKey [2 * (length2.Hash + length2.Incarnation + length2.Hash)]byte
 		for i, b := range r.currAccK {
 			fullKey[i*2] = b / 16
 			fullKey[i*2+1] = b % 16
 		}
 		for i, b := range binary.BigEndian.AppendUint64(nil, r.a.Incarnation) {
-			fullKey[2*length.Hash+i*2] = b / 16
-			fullKey[2*length.Hash+i*2+1] = b % 16
+			fullKey[2*length2.Hash+i*2] = b / 16
+			fullKey[2*length2.Hash+i*2+1] = b % 16
 		}
-		baseKeyLen := 2 * (length.Hash + length.Incarnation)
+		baseKeyLen := 2 * (length2.Hash + length2.Incarnation)
 		wantProof = func(prefix []byte) *proofElement {
 			copy(fullKey[baseKeyLen:], prefix)
 			return r.proofRetainer.ProofElement(fullKey[:baseKeyLen+len(prefix)])
@@ -780,7 +779,7 @@ func (c *AccTrieCursor) Next() (k, v []byte, hasTree bool, err error) {
 	}
 	if c.k[c.lvl] == nil {
 		c.cur = nil
-		c.SkipState = c.SkipState && !dbutils.NextNibblesSubtree(c.prev, &c.next)
+		c.SkipState = c.SkipState && !dbutils2.NextNibblesSubtree(c.prev, &c.next)
 		return nil, nil, false, nil
 	}
 	ok, err := c._consume()
@@ -881,7 +880,7 @@ func (c *AccTrieCursor) _nextSiblingOfParentInMem() bool {
 }
 
 func (c *AccTrieCursor) _nextSiblingInDB() error {
-	ok := dbutils.NextNibblesSubtree(c.k[c.lvl], &c.next)
+	ok := dbutils2.NextNibblesSubtree(c.k[c.lvl], &c.next)
 	if !ok {
 		c.k[c.lvl] = nil
 		return nil
@@ -978,7 +977,7 @@ func (c *AccTrieCursor) _next() (k, v []byte, hasTree bool, err error) {
 	for {
 		if c.k[c.lvl] == nil {
 			c.cur = nil
-			c.SkipState = c.SkipState && !dbutils.NextNibblesSubtree(c.prev, &c.next)
+			c.SkipState = c.SkipState && !dbutils2.NextNibblesSubtree(c.prev, &c.next)
 			return nil, nil, false, nil
 		}
 
@@ -1101,7 +1100,7 @@ func (c *StorageTrieCursor) Next() (k, v []byte, hasTree bool, err error) {
 		return []byte{}, nil, false, err
 	}
 	if c.k[c.lvl] == nil {
-		c.skipState = c.skipState && !dbutils.NextNibblesSubtree(c.prev, &c.next)
+		c.skipState = c.skipState && !dbutils2.NextNibblesSubtree(c.prev, &c.next)
 		c.cur = nil
 		return nil, nil, false, nil
 	}
@@ -1135,23 +1134,7 @@ func (c *StorageTrieCursor) _consume() (bool, error) {
 }
 
 func (c *StorageTrieCursor) _seek(seek, withinPrefix []byte) (bool, error) {
-	var k, v []byte
-	var err error
-	if len(seek) == 40 {
-		k, v, err = c.c.Seek(seek)
-	} else {
-		// optimistic .Next call, can use result in 2 cases:
-		// - no child found, means: len(k) <= c.lvl
-		// - looking for first child, means: c.childID[c.lvl] <= int8(bits.TrailingZeros16(c.hasTree[c.lvl]))
-		// otherwise do .Seek call
-		//k, v, err = c.c.Next()
-		//if err != nil {
-		//	return false, err
-		//}
-		//if len(k) > c.lvl && c.childID[c.lvl] > int8(bits.TrailingZeros16(c.hasTree[c.lvl])) {
-		k, v, err = c.c.Seek(seek)
-		//}
-	}
+	k, v, err := c.c.Seek(seek)
 	if err != nil {
 		return false, err
 	}
@@ -1257,7 +1240,7 @@ func (c *StorageTrieCursor) _nextSiblingOfParentInMem() bool {
 }
 
 func (c *StorageTrieCursor) _nextSiblingInDB() error {
-	ok := dbutils.NextNibblesSubtree(c.k[c.lvl], &c.next)
+	ok := dbutils2.NextNibblesSubtree(c.k[c.lvl], &c.next)
 	if !ok {
 		c.k[c.lvl] = nil
 		return nil
@@ -1287,7 +1270,7 @@ func (c *StorageTrieCursor) _next() (k, v []byte, hasTree bool, err error) {
 	for {
 		if c.k[c.lvl] == nil {
 			c.cur = nil
-			c.skipState = c.skipState && !dbutils.NextNibblesSubtree(c.prev, &c.next)
+			c.skipState = c.skipState && !dbutils2.NextNibblesSubtree(c.prev, &c.next)
 			return nil, nil, false, nil
 		}
 
@@ -1374,7 +1357,7 @@ func isDenseSequence(prev []byte, next []byte) bool {
 	if len(prev) == 0 && len(next) == 0 {
 		return false
 	}
-	ok := dbutils.NextNibblesSubtree(prev, &isSequenceBuf)
+	ok := dbutils2.NextNibblesSubtree(prev, &isSequenceBuf)
 	if len(prev) > 0 && !ok {
 		return true
 	}
@@ -1396,7 +1379,7 @@ var isSequenceBuf = make([]byte, 256)
 
 func firstNotCoveredPrefix(prev, prefix, buf []byte) ([]byte, bool) {
 	if len(prev) > 0 {
-		if !dbutils.NextNibblesSubtree(prev, &buf) {
+		if !dbutils2.NextNibblesSubtree(prev, &buf) {
 			return buf, true
 		}
 	} else {
@@ -1456,12 +1439,12 @@ func keyIsBefore(k1, k2 []byte) bool {
 func UnmarshalTrieNodeTyped(v []byte) (hasState, hasTree, hasHash uint16, hashes []libcommon.Hash, rootHash libcommon.Hash) {
 	hasState, hasTree, hasHash, v = binary.BigEndian.Uint16(v), binary.BigEndian.Uint16(v[2:]), binary.BigEndian.Uint16(v[4:]), v[6:]
 	if bits.OnesCount16(hasHash)+1 == len(v)/length2.Hash {
-		rootHash.SetBytes(common.CopyBytes(v[:32]))
+		rootHash.SetBytes(libcommon.CopyBytes(v[:32]))
 		v = v[32:]
 	}
 	hashes = make([]libcommon.Hash, len(v)/length2.Hash)
 	for i := 0; i < len(hashes); i++ {
-		hashes[i].SetBytes(common.CopyBytes(v[i*length2.Hash : (i+1)*length2.Hash]))
+		hashes[i].SetBytes(libcommon.CopyBytes(v[i*length2.Hash : (i+1)*length2.Hash]))
 	}
 	return
 }
@@ -1488,7 +1471,7 @@ func MarshalTrieNodeTyped(hasState, hasTree, hasHash uint16, h []libcommon.Hash,
 }
 
 func StorageKey(addressHash []byte, incarnation uint64, prefix []byte) []byte {
-	return dbutils.GenerateCompositeStoragePrefix(addressHash, incarnation, prefix)
+	return dbutils2.GenerateCompositeStoragePrefix(addressHash, incarnation, prefix)
 }
 
 func MarshalTrieNode(hasState, hasTree, hasHash uint16, hashes, rootHash []byte, buf []byte) []byte {
@@ -1510,11 +1493,11 @@ func CastTrieNodeValue(hashes, rootHash []byte) []libcommon.Hash {
 	to := make([]libcommon.Hash, len(hashes)/length2.Hash+len(rootHash)/length2.Hash)
 	i := 0
 	if len(rootHash) > 0 {
-		to[0].SetBytes(common.CopyBytes(rootHash))
+		to[0].SetBytes(libcommon.CopyBytes(rootHash))
 		i++
 	}
 	for j := 0; j < len(hashes)/length2.Hash; j++ {
-		to[i].SetBytes(common.CopyBytes(hashes[j*length2.Hash : (j+1)*length2.Hash]))
+		to[i].SetBytes(libcommon.CopyBytes(hashes[j*length2.Hash : (j+1)*length2.Hash]))
 		i++
 	}
 	return to

@@ -8,13 +8,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ledgerwatch/erigon-lib/common/hexutil"
+	"github.com/ledgerwatch/erigon-lib/kv/dbutils"
+
 	"github.com/holiman/uint256"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/hexutility"
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon-lib/kv/memdb"
-	"github.com/ledgerwatch/erigon/common/dbutils"
-	"github.com/ledgerwatch/erigon/common/hexutil"
 	"github.com/ledgerwatch/erigon/core/types/accounts"
 	"github.com/ledgerwatch/erigon/crypto"
 	"github.com/ledgerwatch/erigon/eth/stagedsync"
@@ -473,7 +474,7 @@ func FuzzTrieRootAccounts(f *testing.F) {
 // populates the trie tables. Then, it modifies the database of accounts but
 // does not update the trie tables.  Finally, for every seeded account (modified
 // and not), it computes a proof for that key and verifies that the proof
-// matches the one as computed by the naive trie implementation and that that
+// matches the one as computed by the naive trie implementation and that
 // proof is valid.
 func FuzzTrieRootAccountProofs(f *testing.F) {
 	addFuzzTrieSeeds(f)
@@ -554,7 +555,7 @@ func FuzzTrieRootAccountProofs(f *testing.F) {
 // modifies the database of storage but does not update the trie tables.
 // Finally, for every seeded storage key (modified and not), it computes a proof for
 // that key and verifies that the proof matches the one as computed by the naive
-// trie implementation and that that proof is valid.
+// trie implementation and that proof is valid.
 func FuzzTrieRootStorageProofs(f *testing.F) {
 	addFuzzTrieSeeds(f)
 

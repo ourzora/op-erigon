@@ -27,34 +27,37 @@ import (
 	"time"
 
 	"github.com/c2h5oh/datasize"
+
 	"github.com/ledgerwatch/erigon-lib/chain"
+	"github.com/ledgerwatch/erigon-lib/chain/networkname"
 	"github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/datadir"
 	"github.com/ledgerwatch/erigon-lib/downloader/downloadercfg"
 	"github.com/ledgerwatch/erigon-lib/txpool/txpoolcfg"
-
+	"github.com/ledgerwatch/erigon/cl/beacon/beacon_router_configuration"
+	"github.com/ledgerwatch/erigon/cl/clparams"
 	"github.com/ledgerwatch/erigon/consensus/ethash/ethashcfg"
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/eth/ethconfig/estimate"
 	"github.com/ledgerwatch/erigon/eth/gasprice/gaspricecfg"
 	"github.com/ledgerwatch/erigon/ethdb/prune"
 	"github.com/ledgerwatch/erigon/params"
-	"github.com/ledgerwatch/erigon/params/networkname"
+	"github.com/ledgerwatch/erigon/rpc"
 )
 
-// AggregationStep number of transactions in smallest static file
-const HistoryV3AggregationStep = 3_125_000 // 100M / 32
-//const HistoryV3AggregationStep = 3_125_000 / 100 // use this to reduce step size for dev/debug
+// BorDefaultMinerGasPrice defines the minimum gas price for bor validators to mine a transaction.
+var BorDefaultMinerGasPrice = big.NewInt(25 * params.GWei)
 
 // FullNodeGPO contains default gasprice oracle settings for full node.
 var FullNodeGPO = gaspricecfg.Config{
-	Blocks:           20,
-	Default:          big.NewInt(0),
-	Percentile:       60,
-	MaxHeaderHistory: 0,
-	MaxBlockHistory:  0,
-	MaxPrice:         gaspricecfg.DefaultMaxPrice,
-	IgnorePrice:      gaspricecfg.DefaultIgnorePrice,
+	Blocks:                  20,
+	Default:                 big.NewInt(0),
+	Percentile:              60,
+	MaxHeaderHistory:        0,
+	MaxBlockHistory:         0,
+	MaxPrice:                gaspricecfg.DefaultMaxPrice,
+	IgnorePrice:             gaspricecfg.DefaultIgnorePrice,
+	MinSuggestedPriorityFee: gaspricecfg.DefaultMinSuggestedPriorityFee,
 }
 
 // LightClientGPO contains default gasprice oracle settings for light client.
@@ -74,7 +77,8 @@ var Defaults = Config{
 		ExecWorkerCount:            estimate.ReconstituteState.WorkersHalf(), //only half of CPU, other half will spend for snapshots build/merge/prune
 		ReconWorkerCount:           estimate.ReconstituteState.Workers(),
 		BodyCacheLimit:             256 * 1024 * 1024,
-		BodyDownloadTimeoutSeconds: 30,
+		BodyDownloadTimeoutSeconds: 2,
+		PruneLimit:                 100,
 	},
 	Ethash: ethashcfg.Config{
 		CachesInMem:      2,
@@ -91,18 +95,17 @@ var Defaults = Config{
 		Recommit: 3 * time.Second,
 	},
 	DeprecatedTxPool: DeprecatedDefaultTxPoolConfig,
+	TxPool:           txpoolcfg.DefaultConfig,
 	RPCGasCap:        50000000,
 	GPO:              FullNodeGPO,
 	RPCTxFeeCap:      1, // 1 ether
 
 	ImportMode: false,
 	Snapshot: BlocksFreezing{
-		Enabled:    false,
+		Enabled:    true,
 		KeepBlocks: false,
 		Produce:    true,
 	},
-
-	SilkwormEnabled: false,
 }
 
 func init() {
@@ -125,7 +128,7 @@ func init() {
 		if xdgDataDir := os.Getenv("XDG_DATA_HOME"); xdgDataDir != "" {
 			Defaults.Ethash.DatasetDir = filepath.Join(xdgDataDir, "erigon-ethash")
 		}
-		Defaults.Ethash.DatasetDir = filepath.Join(home, ".local/share/erigon-ethash")
+		Defaults.Ethash.DatasetDir = filepath.Join(home, ".local/share/erigon-ethash") //nolint:gocritic
 	}
 }
 
@@ -178,8 +181,6 @@ type Config struct {
 	// for nodes to connect to.
 	EthDiscoveryURLs []string
 
-	P2PEnabled bool
-
 	Prune     prune.Mode
 	BatchSize datasize.ByteSize // Batch size for execution stage
 
@@ -187,8 +188,10 @@ type Config struct {
 
 	BadBlockHash common.Hash // hash of the block marked as bad
 
-	Snapshot   BlocksFreezing
-	Downloader *downloadercfg.Cfg
+	Snapshot     BlocksFreezing
+	Downloader   *downloadercfg.Cfg
+	BeaconRouter beacon_router_configuration.RouterConfiguration
+	CaplinConfig clparams.CaplinConfig
 
 	Dirs datadir.Dirs
 
@@ -207,7 +210,6 @@ type Config struct {
 
 	Clique params.ConsensusSnapshotConfig
 	Aura   chain.AuRaConfig
-	Bor    chain.BorConfig
 
 	// Transaction pool options
 	DeprecatedTxPool DeprecatedTxPoolConfig
@@ -228,16 +230,17 @@ type Config struct {
 	//  New DB and Snapshots format of history allows: parallel blocks execution, get state as of given transaction without executing whole block.",
 	HistoryV3 bool
 
-	// gRPC Address to connect to Heimdall node
-	HeimdallgRPCAddress string
-
 	// URL to connect to Heimdall node
 	HeimdallURL string
-
 	// No heimdall service
 	WithoutHeimdall bool
 	// Heimdall services active
 	WithHeimdallMilestones bool
+	// Heimdall waypoint recording active
+	WithHeimdallWaypointRecording bool
+	// Use polygon checkpoint sync in preference to POW downloader
+	PolygonSync bool
+
 	// Ethstats service
 	Ethstats string
 	// Consensus layer
@@ -248,22 +251,38 @@ type Config struct {
 	SentinelAddr                string
 	SentinelPort                uint64
 
-	OverrideCancunTime         *big.Int `toml:",omitempty"`
-	OverrideShanghaiTime       *big.Int `toml:",omitempty"`
-	OverrideOptimismCanyonTime *big.Int `toml:",omitempty"`
+	OverrideCancunTime   *big.Int `toml:",omitempty"`
+	OverrideShanghaiTime *big.Int `toml:",omitempty"`
 
-	DropUselessPeers bool
+	OverrideOptimismCanyonTime  *big.Int `toml:",omitempty"`
+	OverrideOptimismEcotoneTime *big.Int `toml:",omitempty"`
+	OverrideOptimismFjordTime   *big.Int `toml:",omitempty"`
+
+	OverridePragueTime *big.Int `toml:",omitempty"`
 
 	RollupSequencerHTTP        string
 	RollupHistoricalRPC        string
 	RollupHistoricalRPCTimeout time.Duration
-	RollupDisableTxPoolGossip  bool
 
 	ForcePartialCommit bool
 
 	// Embedded Silkworm support
-	SilkwormEnabled bool
-	SilkwormPath    string
+	SilkwormExecution            bool
+	SilkwormRpcDaemon            bool
+	SilkwormSentry               bool
+	SilkwormVerbosity            string
+	SilkwormNumContexts          uint32
+	SilkwormRpcLogEnabled        bool
+	SilkwormRpcLogDirPath        string
+	SilkwormRpcLogMaxFileSize    uint16
+	SilkwormRpcLogMaxFiles       uint16
+	SilkwormRpcLogDumpResponse   bool
+	SilkwormRpcNumWorkers        uint32
+	SilkwormRpcJsonCompatibility bool
+
+	DisableTxPoolGossip bool
+
+	RollupHaltOnIncompatibleProtocolVersion string
 }
 
 type Sync struct {
@@ -275,6 +294,13 @@ type Sync struct {
 
 	BodyCacheLimit             datasize.ByteSize
 	BodyDownloadTimeoutSeconds int // TODO: change to duration
+	PruneLimit                 int //the maximum records to delete from the DB during pruning
+	BreakAfterStage            string
+	LoopBlockLimit             uint
+
+	UploadLocation   string
+	UploadFrom       rpc.BlockNumber
+	FrozenBlockLimit uint64
 }
 
 // Chains where snapshots are enabled by default
@@ -283,6 +309,7 @@ var ChainsWithSnapshots = map[string]struct{}{
 	networkname.SepoliaChainName:    {},
 	networkname.GoerliChainName:     {},
 	networkname.MumbaiChainName:     {},
+	networkname.AmoyChainName:       {},
 	networkname.BorMainnetChainName: {},
 	networkname.GnosisChainName:     {},
 	networkname.ChiadoChainName:     {},

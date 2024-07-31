@@ -26,6 +26,8 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -66,6 +68,8 @@ const (
 
 	// Maximum amount of time allowed for writing a complete message.
 	frameWriteTimeout = 20 * time.Second
+
+	serverStatsLogInterval = 60 * time.Second
 )
 
 var errServerStopped = errors.New("server stopped")
@@ -154,6 +158,9 @@ type Config struct {
 	// Internet.
 	NAT nat.Interface `toml:",omitempty"`
 
+	// NAT interface description (see NAT.Parse()).
+	NATSpec string
+
 	// If Dialer is set to a non-nil value, the given Dialer
 	// is used to dial outbound peer connections.
 	Dialer NodeDialer `toml:"-"`
@@ -173,6 +180,18 @@ type Config struct {
 	MetricsEnabled bool
 }
 
+func (config *Config) ListenPort() int {
+	_, portStr, err := net.SplitHostPort(config.ListenAddr)
+	if err != nil {
+		return 0
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return 0
+	}
+	return port
+}
+
 // Server manages all peer connections.
 type Server struct {
 	// Config fields may not be modified while the server is running.
@@ -184,8 +203,8 @@ type Server struct {
 	newPeerHook  func(*Peer)
 	listenFunc   func(network, addr string) (net.Listener, error)
 
-	lock    sync.Mutex // protects running
-	running bool
+	lock    sync.Mutex // protects whole bunch of stuff
+	running atomic.Bool
 
 	listener     net.Listener
 	ourHandshake *protoHandshake
@@ -215,6 +234,9 @@ type Server struct {
 
 	// State of run loop and listenLoop.
 	inboundHistory expHeap
+
+	errorsMu sync.Mutex
+	errors   map[string]uint
 }
 
 type peerOpFunc func(map[enode.ID]*Peer)
@@ -398,29 +420,25 @@ func (srv *Server) SubscribeEvents(ch chan *PeerEvent) event.Subscription {
 }
 
 // Self returns the local node's endpoint information.
-func (srv *Server) Self() *enode.Node {
-	srv.lock.Lock()
-	ln := srv.localnode
-	srv.lock.Unlock()
-
-	if ln == nil {
-		return enode.NewV4(&srv.PrivateKey.PublicKey, net.ParseIP("0.0.0.0"), 0, 0)
+func (srv *Server) Self() (ln *enode.Node) {
+	if srv.localnode != nil {
+		return srv.localnode.Node()
 	}
-	return ln.Node()
+	return enode.NewV4(&srv.PrivateKey.PublicKey, net.ParseIP("0.0.0.0"), 0, 0)
 }
 
 // Stop terminates the server and all active peer connections.
 // It blocks until all active connections have been closed.
 func (srv *Server) Stop() {
 	srv.lock.Lock()
-	if !srv.running {
+	if !srv.running.Load() {
 		if srv.nodedb != nil {
 			srv.nodedb.Close()
 		}
 		srv.lock.Unlock()
 		return
 	}
-	srv.running = false
+	srv.running.Store(false)
 	srv.quitFunc()
 	if srv.listener != nil {
 		// this unblocks listener Accept
@@ -458,20 +476,15 @@ func (s *sharedUDPConn) ReadFromUDP(b []byte) (n int, addr *net.UDPAddr, err err
 func (s *sharedUDPConn) Close() error {
 	return nil
 }
-func (srv *Server) Running() bool {
-	srv.lock.Lock()
-	defer srv.lock.Unlock()
-	return srv.running
-}
 
 // Start starts running the server.
 // Servers can not be re-used after stopping.
 func (srv *Server) Start(ctx context.Context, logger log.Logger) error {
-	srv.lock.Lock()
-	defer srv.lock.Unlock()
-	if srv.running {
+	if srv.running.Load() {
 		return errors.New("server already running")
 	}
+	srv.lock.Lock()
+	defer srv.lock.Unlock()
 
 	srv.logger = logger
 	if srv.clock == nil {
@@ -517,7 +530,7 @@ func (srv *Server) Start(ctx context.Context, logger log.Logger) error {
 	}
 	srv.setupDialScheduler()
 
-	srv.running = true
+	srv.running.Store(true)
 	srv.loopWG.Add(1)
 	go srv.run()
 	return nil
@@ -537,20 +550,24 @@ func (srv *Server) setupLocalNode() error {
 	}
 	sort.Sort(capsByNameAndVersion(srv.ourHandshake.Caps))
 	// Create the local node
-	db, err := enode.OpenDB(srv.Config.NodeDatabase, srv.Config.TmpDir)
+	db, err := enode.OpenDB(srv.quitCtx, srv.Config.NodeDatabase, srv.Config.TmpDir, srv.logger)
 	if err != nil {
 		return err
 	}
 	srv.nodedb = db
+
 	srv.localnode = enode.NewLocalNode(db, srv.PrivateKey, srv.logger)
 	srv.localnode.SetFallbackIP(net.IP{127, 0, 0, 1})
-	srv.updateLocalNodeStaticAddrCache()
+
 	// TODO: check conflicts
 	for _, p := range srv.Protocols {
 		for _, e := range p.Attributes {
 			srv.localnode.Set(e)
 		}
 	}
+
+	srv.updateLocalNodeStaticAddrCache()
+
 	switch srv.NAT.(type) {
 	case nil:
 		// No NAT interface, do nothing.
@@ -616,6 +633,7 @@ func (srv *Server) setupDiscovery(ctx context.Context) error {
 		}
 	}
 	srv.localnode.SetFallbackUDP(realaddr.Port)
+	srv.updateLocalNodeStaticAddrCache()
 
 	// Discovery V4
 	var unhandled chan discover.ReadPacket
@@ -632,7 +650,7 @@ func (srv *Server) setupDiscovery(ctx context.Context) error {
 			Unhandled:   unhandled,
 			Log:         srv.logger,
 		}
-		ntab, err := discover.ListenV4(ctx, conn, srv.localnode, cfg)
+		ntab, err := discover.ListenV4(ctx, fmt.Sprint(srv.Config.Protocols[0].Version), conn, srv.localnode, cfg)
 		if err != nil {
 			return err
 		}
@@ -650,13 +668,14 @@ func (srv *Server) setupDiscovery(ctx context.Context) error {
 		}
 		var err error
 		if sconn != nil {
-			srv.DiscV5, err = discover.ListenV5(ctx, sconn, srv.localnode, cfg)
+			srv.DiscV5, err = discover.ListenV5(ctx, fmt.Sprint(srv.Config.Protocols[0].Version), sconn, srv.localnode, cfg)
 		} else {
-			srv.DiscV5, err = discover.ListenV5(ctx, conn, srv.localnode, cfg)
+			srv.DiscV5, err = discover.ListenV5(ctx, fmt.Sprint(srv.Config.Protocols[0].Version), conn, srv.localnode, cfg)
 		}
 		if err != nil {
 			return err
 		}
+		srv.discmix.AddSource(srv.DiscV5.RandomNodes())
 	}
 	return nil
 }
@@ -718,6 +737,8 @@ func (srv *Server) setupListening(ctx context.Context) error {
 	// Update the local node record and map the TCP listening port if NAT is configured.
 	if tcp, ok := listener.Addr().(*net.TCPAddr); ok {
 		srv.localnode.Set(enr.TCP(tcp.Port))
+		srv.updateLocalNodeStaticAddrCache()
+
 		if !tcp.IP.IsLoopback() && (srv.NAT != nil) && srv.NAT.SupportsMapping() {
 			srv.loopWG.Add(1)
 			go func() {
@@ -767,6 +788,9 @@ func (srv *Server) run() {
 	for _, n := range srv.TrustedNodes {
 		trusted[n.ID()] = true
 	}
+
+	logTimer := time.NewTicker(serverStatsLogInterval)
+	defer logTimer.Stop()
 
 running:
 	for {
@@ -831,6 +855,11 @@ running:
 			if pd.Inbound() {
 				inboundCount--
 			}
+		case <-logTimer.C:
+			vals := []interface{}{"protocol", srv.Config.Protocols[0].Version, "peers", len(peers), "trusted", len(trusted), "inbound", inboundCount}
+			vals = append(vals, srv.listErrors()...)
+
+			srv.logger.Debug("[p2p] Server", vals...)
 		}
 	}
 
@@ -878,6 +907,8 @@ func (srv *Server) postHandshakeChecks(peers map[enode.ID]*Peer, inboundCount in
 // inbound connections.
 func (srv *Server) listenLoop(ctx context.Context) {
 	srv.logger.Trace("TCP listener up", "addr", srv.listener.Addr())
+
+	srv.resetErrors()
 
 	// The slots limit accepts of new connections.
 	slots := semaphore.NewWeighted(int64(srv.MaxPendingPeers))
@@ -986,10 +1017,7 @@ func (srv *Server) SetupConn(fd net.Conn, flags connFlag, dialDest *enode.Node) 
 
 func (srv *Server) setupConn(c *conn, flags connFlag, dialDest *enode.Node) error {
 	// Prevent leftover pending conns from entering the handshake.
-	srv.lock.Lock()
-	running := srv.running
-	srv.lock.Unlock()
-	if !running {
+	if !srv.running.Load() {
 		return errServerStopped
 	}
 
@@ -1007,6 +1035,7 @@ func (srv *Server) setupConn(c *conn, flags connFlag, dialDest *enode.Node) erro
 	// Run the RLPx handshake.
 	remotePubkey, err := c.doEncHandshake(srv.PrivateKey)
 	if err != nil {
+		srv.addError(err)
 		srv.logger.Trace("Failed RLPx handshake", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err)
 		return err
 	}
@@ -1026,6 +1055,7 @@ func (srv *Server) setupConn(c *conn, flags connFlag, dialDest *enode.Node) erro
 	// Run the capability negotiation handshake.
 	phs, err := c.doProtoHandshake(srv.ourHandshake)
 	if err != nil {
+		srv.addError(err)
 		clog.Trace("Failed p2p handshake", "err", err)
 		return err
 	}
@@ -1171,4 +1201,43 @@ func (srv *Server) PeersInfo() []*PeerInfo {
 		}
 	}
 	return infos
+}
+
+func (srv *Server) addError(err error) {
+	srv.errorsMu.Lock()
+	defer srv.errorsMu.Unlock()
+	if srv.errors == nil {
+		srv.errors = make(map[string]uint)
+	}
+	srv.errors[cleanError(err.Error())]++
+}
+
+func (srv *Server) resetErrors() {
+	srv.errorsMu.Lock()
+	srv.errors = map[string]uint{}
+	srv.errorsMu.Unlock()
+}
+
+func (srv *Server) listErrors() []interface{} {
+	srv.errorsMu.Lock()
+	defer srv.errorsMu.Unlock()
+
+	list := make([]interface{}, 0, len(srv.errors)*2)
+	for err, count := range srv.errors {
+		list = append(list, err, count)
+	}
+	return list
+}
+
+func cleanError(err string) string {
+	switch {
+	case strings.HasSuffix(err, "i/o timeout"):
+		return "i/o timeout"
+	case strings.HasSuffix(err, "closed by the remote host."):
+		return "closed by remote"
+	case strings.HasSuffix(err, "connection reset by peer"):
+		return "closed by remote"
+	default:
+		return err
+	}
 }

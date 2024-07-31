@@ -7,18 +7,19 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/ledgerwatch/erigon-lib/kv/dbutils"
+
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/hexutility"
 	"github.com/ledgerwatch/erigon-lib/gointerfaces"
 	"github.com/ledgerwatch/erigon-lib/gointerfaces/remote"
 	types2 "github.com/ledgerwatch/erigon-lib/gointerfaces/types"
 	"github.com/ledgerwatch/erigon-lib/kv"
+	bortypes "github.com/ledgerwatch/erigon/polygon/bor/types"
 	"github.com/ledgerwatch/erigon/turbo/engineapi/engine_helpers"
 	"github.com/ledgerwatch/erigon/turbo/services"
 	"github.com/ledgerwatch/log/v3"
 
-	common2 "github.com/ledgerwatch/erigon/common"
-	"github.com/ledgerwatch/erigon/common/dbutils"
 	"github.com/ledgerwatch/erigon/core/rawdb"
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/ethdb/cbor"
@@ -149,19 +150,19 @@ func NotifyNewHeaders(ctx context.Context, finishStageBeforeSync uint64, finishS
 	var notifyTo = notifyFrom
 	var notifyToHash libcommon.Hash
 	var headersRlp [][]byte
-	if err := tx.ForEach(kv.Headers, hexutility.EncodeTs(notifyFrom), func(k, headerRLP []byte) error {
-		if len(headerRLP) == 0 {
+	if err := tx.ForEach(kv.HeaderCanonical, hexutility.EncodeTs(notifyFrom), func(k, hash []byte) (err error) {
+		if len(hash) == 0 {
 			return nil
 		}
-		notifyTo = binary.BigEndian.Uint64(k)
-		var err error
-		if notifyToHash, err = blockReader.CanonicalHash(ctx, tx, notifyTo); err != nil {
-			logger.Warn("[Finish] failed checking if header is cannonical")
+		blockNum := binary.BigEndian.Uint64(k)
+		if blockNum > finishStageAfterSync { //[from,to)
+			return nil
 		}
-
-		headerHash := libcommon.BytesToHash(k[8:])
-		if notifyToHash == headerHash {
-			headersRlp = append(headersRlp, common2.CopyBytes(headerRLP))
+		notifyTo = blockNum
+		notifyToHash = libcommon.BytesToHash(hash)
+		headerRLP := rawdb.ReadHeaderRLP(tx, notifyToHash, notifyTo)
+		if headerRLP != nil {
+			headersRlp = append(headersRlp, libcommon.CopyBytes(headerRLP))
 		}
 
 		return libcommon.Stopped(ctx.Done())
@@ -183,7 +184,7 @@ func NotifyNewHeaders(ctx context.Context, finishStageBeforeSync uint64, finishS
 			notifier.OnLogs(logs)
 		}
 		logTiming := time.Since(t)
-		logger.Info("RPC Daemon notified of new headers", "from", notifyFrom-1, "to", notifyTo, "hash", notifyToHash, "header sending", headerTiming, "log sending", logTiming)
+		logger.Info("RPC Daemon notified of new headers", "from", notifyFrom-1, "to", notifyTo, "amount", len(headersRlp), "hash", notifyToHash, "header sending", headerTiming, "log sending", logTiming)
 	}
 	return nil
 }
@@ -219,7 +220,7 @@ func ReadLogs(tx kv.Tx, from uint64, isUnwind bool, blockReader services.FullBlo
 
 		// bor transactions are at the end of the bodies transactions (added manually but not actually part of the block)
 		if txIndex == uint64(len(block.Transactions())) {
-			txHash = types.ComputeBorTxHash(blockNum, block.Hash())
+			txHash = bortypes.ComputeBorTxHash(blockNum, block.Hash())
 		} else {
 			txHash = block.Transactions()[txIndex].Hash()
 		}

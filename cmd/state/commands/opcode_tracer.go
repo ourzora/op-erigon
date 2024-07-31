@@ -8,17 +8,18 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/holiman/uint256"
+	datadir2 "github.com/ledgerwatch/erigon-lib/common/datadir"
 	"github.com/ledgerwatch/log/v3"
 	"github.com/spf13/cobra"
 
 	chain2 "github.com/ledgerwatch/erigon-lib/chain"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
-	"github.com/ledgerwatch/erigon-lib/common/fixedgas"
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon-lib/kv/kvcfg"
 	"github.com/ledgerwatch/erigon-lib/kv/mdbx"
@@ -257,7 +258,7 @@ func (ot *opcodeTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, 
 	}
 
 	pc16 := uint16(pc)
-	currentTxHash := ot.env.TxContext().TxHash
+	currentTxHash := ot.env.TxHash
 	currentTxDepth := opDepth - 1
 
 	ls := len(ot.stack)
@@ -429,7 +430,8 @@ func OpcodeTracer(genesis *types.Genesis, blockNum uint64, chaindata string, num
 		}
 		return nil
 	})
-	blockReader := freezeblocks.NewBlockReader(freezeblocks.NewRoSnapshots(ethconfig.BlocksFreezing{Enabled: false}, "", log.New()), nil /* BorSnapshots */)
+	dirs := datadir2.New(filepath.Dir(chainDb.(*mdbx.MdbxKV).Path()))
+	blockReader := freezeblocks.NewBlockReader(freezeblocks.NewRoSnapshots(ethconfig.BlocksFreezing{Enabled: false}, dirs.Snap, 0, log.New()), nil /* BorSnapshots */)
 
 	chainConfig := genesis.Config
 	vmConfig := vm.Config{Tracer: ot, Debug: true}
@@ -709,7 +711,7 @@ func runBlock(engine consensus.Engine, ibs *state.IntraBlockState, txnWriter sta
 	chainConfig *chain2.Config, getHeader func(hash libcommon.Hash, number uint64) *types.Header, block *types.Block, vmConfig vm.Config, trace bool, logger log.Logger) (types.Receipts, error) {
 	header := block.Header()
 	vmConfig.TraceJumpDest = true
-	gp := new(core.GasPool).AddGas(block.GasLimit()).AddBlobGas(fixedgas.MaxBlobGasPerBlock)
+	gp := new(core.GasPool).AddGas(block.GasLimit()).AddBlobGas(chainConfig.GetMaxBlobGasPerBlock())
 	usedGas := new(uint64)
 	usedBlobGas := new(uint64)
 	var receipts types.Receipts

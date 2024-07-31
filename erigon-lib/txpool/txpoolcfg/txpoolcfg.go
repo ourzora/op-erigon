@@ -23,36 +23,47 @@ import (
 	"time"
 
 	"github.com/c2h5oh/datasize"
+
+	"github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/fixedgas"
 	emath "github.com/ledgerwatch/erigon-lib/common/math"
 	"github.com/ledgerwatch/erigon-lib/types"
 )
 
+// BorDefaultTxPoolPriceLimit defines the minimum gas price limit for bor to enforce txs acceptance into the pool.
+const BorDefaultTxPoolPriceLimit = 25 * common.GWei
+
 type Config struct {
-	DBDir                 string
-	TracedSenders         []string // List of senders for which tx pool should print out debugging info
+	DBDir               string
+	TracedSenders       []string // List of senders for which tx pool should print out debugging info
+	PendingSubPoolLimit int
+	BaseFeeSubPoolLimit int
+	QueuedSubPoolLimit  int
+	MinFeeCap           uint64
+	AccountSlots        uint64 // Number of executable transaction slots guaranteed per account
+	BlobSlots           uint64 // Total number of blobs (not txs) allowed per account
+	TotalBlobPoolLimit  uint64 // Total number of blobs (not txs) allowed within the txpool
+	PriceBump           uint64 // Price bump percentage to replace an already existing transaction
+	BlobPriceBump       uint64 //Price bump percentage to replace an existing 4844 blob tx (type-3)
+
+	// regular batch tasks processing
 	SyncToNewPeersEvery   time.Duration
 	ProcessRemoteTxsEvery time.Duration
 	CommitEvery           time.Duration
 	LogEvery              time.Duration
-	PendingSubPoolLimit   int
-	BaseFeeSubPoolLimit   int
-	QueuedSubPoolLimit    int
-	MinFeeCap             uint64
-	AccountSlots          uint64 // Number of executable transaction slots guaranteed per account
-	BlobSlots             uint64 // Total number of blobs (not txs) allowed per account
-	PriceBump             uint64 // Price bump percentage to replace an already existing transaction
-	BlobPriceBump         uint64 //Price bump percentage to replace an existing 4844 blob tx (type-3)
-	OverrideShanghaiTime  *big.Int
-	OverrideCancunTime    *big.Int
-	MdbxPageSize          datasize.ByteSize
-	MdbxDBSizeLimit       datasize.ByteSize
-	MdbxGrowthStep        datasize.ByteSize
 
-	Optimism   bool
-	NoTxGossip bool
+	//txpool db
+	MdbxPageSize    datasize.ByteSize
+	MdbxDBSizeLimit datasize.ByteSize
+	MdbxGrowthStep  datasize.ByteSize
+
+	OverrideShanghaiTime *big.Int
+
+	Optimism bool
 
 	OverrideOptimismCanyonTime *big.Int
+
+	NoGossip bool // this mode doesn't broadcast any txs, and if receive remote-txn - skip it
 }
 
 var DefaultConfig = Config{
@@ -65,14 +76,16 @@ var DefaultConfig = Config{
 	BaseFeeSubPoolLimit: 10_000,
 	QueuedSubPoolLimit:  10_000,
 
-	MinFeeCap:     1,
-	AccountSlots:  16, //TODO: to choose right value (16 to be compatible with Geth)
-	BlobSlots:     48, // Default for a total of 8 txs for 6 blobs each - for hive tests
-	PriceBump:     10, // Price bump percentage to replace an already existing transaction
-	BlobPriceBump: 100,
+	MinFeeCap:          1,
+	AccountSlots:       16,  //TODO: to choose right value (16 to be compatible with Geth)
+	BlobSlots:          48,  // Default for a total of 8 txs for 6 blobs each - for hive tests
+	TotalBlobPoolLimit: 480, // Default for a total of 10 different accounts hitting the above limit
+	PriceBump:          10,  // Price bump percentage to replace an already existing transaction
+	BlobPriceBump:      100,
 
-	Optimism:   false,
-	NoTxGossip: false,
+	Optimism: false,
+
+	NoGossip: false,
 }
 
 type DiscardReason uint8
@@ -109,7 +122,8 @@ const (
 	BlobHashCheckFail   DiscardReason = 28 // KZGcommitment's versioned hash has to be equal to blob_versioned_hash at the same index
 	UnmatchedBlobTxExt  DiscardReason = 29 // KZGcommitments must match the corresponding blobs and proofs
 	BlobTxReplace       DiscardReason = 30 // Cannot replace type-3 blob txn with another type of txn
-	TxTypeNotSupported  DiscardReason = 31
+	BlobPoolOverflow    DiscardReason = 31 // The total number of blobs (through blob txs) in the pool has reached its limit
+	TxTypeNotSupported  DiscardReason = 32
 )
 
 func (r DiscardReason) String() string {
@@ -172,6 +186,8 @@ func (r DiscardReason) String() string {
 		return "max number of blobs exceeded"
 	case BlobTxReplace:
 		return "can't replace blob-txn with a non-blob-txn"
+	case BlobPoolOverflow:
+		return "blobs limit in txpool is full"
 	default:
 		panic(fmt.Sprintf("discard reason: %d", r))
 	}

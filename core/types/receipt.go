@@ -23,19 +23,27 @@ import (
 	"io"
 	"math/big"
 
-	"github.com/holiman/uint256"
 	"github.com/ledgerwatch/erigon-lib/chain"
 
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
+	"github.com/ledgerwatch/erigon-lib/common/hexutil"
 	"github.com/ledgerwatch/erigon-lib/common/hexutility"
 
-	"github.com/ledgerwatch/erigon/common/hexutil"
+	"github.com/ledgerwatch/erigon-lib/opstack"
+
 	"github.com/ledgerwatch/erigon/crypto"
 	"github.com/ledgerwatch/erigon/rlp"
 )
 
 // go:generate gencodec -type Receipt -field-override receiptMarshaling -out gen_receipt_json.go
-//go:generate codecgen -o receipt_codecgen_gen.go -r "^Receipts$|^Receipt$|^Logs$|^Log$" -st "codec" -j=false -nx=true -ta=true -oe=false -d 2 receipt.go log.go
+
+// disabling codecgen generation since it does not work for go1.22
+// to get it working need to update github.com/ugorji/go/codec to v1.2.12 which has the fix:
+//   - https://github.com/ugorji/go/commit/8286c2dc986535d23e3fad8d3e816b9dd1e5aea6
+// however updating the lib has caused us issues in the past, and we don't have good unit test coverage for updating atm
+// we also use this for storing Receipts and Logs in the DB - we won't be doing that in Erigon 3
+// do not regen, more context: https://github.com/ledgerwatch/erigon/pull/10105#pullrequestreview-2027423601
+// go:generate codecgen -o receipt_codecgen_gen.go -r "^Receipts$|^Receipt$|^Logs$|^Log$" -st "codec" -j=false -nx=true -ta=true -oe=false -d 2 receipt.go log.go
 
 var (
 	receiptStatusFailedRLP     = []byte{}
@@ -80,7 +88,7 @@ type Receipt struct {
 	L1GasPrice *big.Int   `json:"l1GasPrice,omitempty"`
 	L1GasUsed  *big.Int   `json:"l1GasUsed,omitempty"`
 	L1Fee      *big.Int   `json:"l1Fee,omitempty"`
-	FeeScalar  *big.Float `json:"l1FeeScalar,omitempty"`
+	FeeScalar  *big.Float `json:"l1FeeScalar,omitempty"` // always nil after Ecotone hardfork
 
 	// DepositNonce was introduced in Regolith to store the actual nonce used by deposit transactions
 	// The state transition process ensures this is only set for Regolith deposit transactions.
@@ -94,6 +102,10 @@ type Receipt struct {
 	// should be computed when set. The state transition process ensures this is only set for
 	// post-Canyon deposit transactions.
 	DepositReceiptVersion *uint64 `json:"depositReceiptVersion,omitempty"`
+
+	L1BlobBaseFee       *big.Int `json:"l1BlobBaseFee,omitempty"`       // Always nil prior to the Ecotone hardfork
+	L1BaseFeeScalar     *uint64  `json:"l1BaseFeeScalar,omitempty"`     // Always nil prior to the Ecotone hardfork
+	L1BlobBaseFeeScalar *uint64  `json:"l1BlobBaseFeeScalar,omitempty"` // Always nil prior to the Ecotone hardfork
 }
 
 type receiptMarshaling struct {
@@ -107,9 +119,12 @@ type receiptMarshaling struct {
 
 	// Optimism
 	L1GasPrice            *hexutil.Big
+	L1BlobBaseFee         *hexutil.Big
 	L1GasUsed             *hexutil.Big
 	L1Fee                 *hexutil.Big
 	FeeScalar             *big.Float
+	L1BaseFeeScalar       *hexutil.Uint64
+	L1BlobBaseFeeScalar   *hexutil.Uint64
 	DepositNonce          *hexutil.Uint64
 	DepositReceiptVersion *hexutil.Uint64
 }
@@ -618,27 +633,32 @@ func (r Receipts) DeriveFields(config *chain.Config, hash libcommon.Hash, number
 		}
 	}
 	if config.IsOptimismBedrock(number) && len(txs) >= 2 { // need at least an info tx and a non-info tx
-		if data := txs[0].GetData(); len(data) >= 4+32*8 { // function selector + 8 arguments to setL1BlockValues
-			l1Basefee := new(uint256.Int).SetBytes(data[4+32*2 : 4+32*3]) // arg index 2
-			overhead := new(uint256.Int).SetBytes(data[4+32*6 : 4+32*7])  // arg index 6
-			scalar := new(uint256.Int).SetBytes(data[4+32*7 : 4+32*8])    // arg index 7
-			fscalar := new(big.Float).SetInt(scalar.ToBig())              // legacy: format fee scalar as big Float
-			fdivisor := new(big.Float).SetUint64(1_000_000)               // 10**6, i.e. 6 decimals
-			feeScalar := new(big.Float).Quo(fscalar, fdivisor)
-			for i := 0; i < len(r); i++ {
-				if tx, ok := txs[i].(RollupMessage); ok && !tx.IsDepositTx() {
-					rollupDataGas := tx.RollupDataGas().DataGas(time, config) // Only fake txs for RPC view-calls are 0.
-
-					r[i].L1GasPrice = l1Basefee.ToBig()
-					// GasUsed reported in receipt should include the overhead
-					r[i].L1GasUsed = new(big.Int).Add(new(big.Int).SetUint64(rollupDataGas), overhead.ToBig())
-					r[i].L1Fee = L1Cost(rollupDataGas, l1Basefee, overhead, scalar).ToBig()
-					r[i].FeeScalar = feeScalar
-				}
+		gasParams, err := opstack.ExtractL1GasParams(config, time, txs[0].GetData())
+		if err != nil {
+			return err
+		}
+		for i := 0; i < len(r); i++ {
+			if txs[i].Type() == DepositTxType {
+				continue
 			}
-		} else {
-			return fmt.Errorf("L1 info tx only has %d bytes, cannot read gas price parameters", len(data))
+
+			r[i].L1GasPrice = gasParams.L1BaseFee.ToBig()
+			l1Fee, l1GasUsed := gasParams.CostFunc(txs[i].RollupCostData())
+			r[i].L1Fee = l1Fee.ToBig()
+			r[i].L1GasUsed = l1GasUsed.ToBig()
+			r[i].FeeScalar = gasParams.FeeScalar
+			r[i].L1BlobBaseFee = gasParams.L1BlobBaseFee.ToBig()
+			r[i].L1BaseFeeScalar = u32ptrTou64ptr(gasParams.L1BaseFeeScalar)
+			r[i].L1BlobBaseFeeScalar = u32ptrTou64ptr(gasParams.L1BlobBaseFeeScalar)
 		}
 	}
 	return nil
+}
+
+func u32ptrTou64ptr(a *uint32) *uint64 {
+	if a == nil {
+		return nil
+	}
+	b := uint64(*a)
+	return &b
 }

@@ -380,23 +380,8 @@ func (tx DepositTx) IsStarkNet() bool {
 func (tx DepositTx) GetPrice() *uint256.Int  { return uint256.NewInt(0) }
 func (tx DepositTx) GetTip() *uint256.Int    { return uint256.NewInt(0) }
 func (tx DepositTx) GetFeeCap() *uint256.Int { return uint256.NewInt(0) }
-
-// Is this needed at all?
 func (tx DepositTx) GetEffectiveGasTip(baseFee *uint256.Int) *uint256.Int {
-	if baseFee == nil {
-		return tx.GetTip()
-	}
-	gasFeeCap := tx.GetFeeCap()
-	// return 0 because effectiveFee cant be < 0
-	if gasFeeCap.Lt(baseFee) {
-		return uint256.NewInt(0)
-	}
-	effectiveFee := new(uint256.Int).Sub(gasFeeCap, baseFee)
-	if tx.GetTip().Lt(effectiveFee) {
-		return tx.GetTip()
-	} else {
-		return effectiveFee
-	}
+	return uint256.NewInt(0)
 }
 
 func (tx DepositTx) Cost() *uint256.Int {
@@ -439,7 +424,7 @@ func (tx DepositTx) copy() *DepositTx {
 		Value:               new(uint256.Int),
 		Gas:                 tx.Gas,
 		IsSystemTransaction: tx.IsSystemTransaction,
-		Data:                common.CopyBytes(tx.Data),
+		Data:                libcommon.CopyBytes(tx.Data),
 	}
 	if tx.Mint != nil {
 		cpy.Mint = new(uint256.Int).Set(tx.Mint)
@@ -475,8 +460,8 @@ func (tx *DepositTx) Sender(signer Signer) (libcommon.Address, error) {
 	return tx.From, nil
 }
 
-func (tx DepositTx) RollupDataGas() RollupGasData {
-	return RollupGasData{}
+func (tx DepositTx) RollupCostData() types2.RollupCostData {
+	return types2.RollupCostData{}
 }
 
 func (tx *DepositTx) GetDataHashes() []libcommon.Hash {

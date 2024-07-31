@@ -36,6 +36,7 @@ import (
 	"github.com/ledgerwatch/erigon-lib/common/length"
 	"github.com/ledgerwatch/erigon-lib/common/u256"
 	"github.com/ledgerwatch/erigon-lib/crypto"
+	"github.com/ledgerwatch/erigon-lib/fastlz"
 	"github.com/ledgerwatch/erigon-lib/gointerfaces/types"
 	"github.com/ledgerwatch/erigon-lib/rlp"
 )
@@ -100,7 +101,7 @@ type TxSlot struct {
 	Traced         bool     // Whether transaction needs to be traced throughout transaction pool code and generate debug printing
 	Creation       bool     // Set to true if "To" field of the transaction is not set
 	Type           byte     // Transaction type
-	Size           uint32   // Size of the payload
+	Size           uint32   // Size of the payload (without the RLP string envelope for typed transactions)
 
 	// EIP-4844: Shard Blob Transactions
 	BlobFeeCap  uint256.Int // max_fee_per_blob_gas
@@ -109,7 +110,7 @@ type TxSlot struct {
 	Commitments []gokzg4844.KZGCommitment
 	Proofs      []gokzg4844.KZGProof
 
-	RollupDataGas uint64 // Translates into a L1 cost based on fee parameters
+	RollupCostData RollupCostData
 }
 
 const (
@@ -185,7 +186,7 @@ func (ctx *TxParseContext) ParseTransaction(payload []byte, pos int, slot *TxSlo
 
 	var wrapperDataPos, wrapperDataLen int
 
-	// If it is non-legacy transaction, the transaction type follows, and then the the list
+	// If it is non-legacy transaction, the transaction type follows, and then the list
 	if !legacy {
 		slot.Type = payload[p]
 		if slot.Type > BlobTxType && slot.Type != DepositTxType {
@@ -290,7 +291,8 @@ func (ctx *TxParseContext) ParseTransaction(payload []byte, pos int, slot *TxSlo
 		}
 	}
 
-	slot.Size = uint32(p - pos)
+	slot.Size = uint32(len(slot.Rlp))
+
 	return p, err
 }
 
@@ -378,7 +380,7 @@ func (ctx *TxParseContext) parseTransactionBody(payload []byte, pos, p0 int, slo
 		}
 		{
 			// full tx contents count towards rollup data gas, not just tx data
-			var zeroes, ones uint64
+			var zeroes, ones, fastLzSize uint64
 			for _, byt := range payload {
 				if byt == 0 {
 					zeroes++
@@ -386,9 +388,8 @@ func (ctx *TxParseContext) parseTransactionBody(payload []byte, pos, p0 int, slo
 					ones++
 				}
 			}
-			zeroesGas := zeroes * 4
-			onesGas := (ones + 68) * 16
-			slot.RollupDataGas = zeroesGas + onesGas
+			fastLzSize = uint64(fastlz.FlzCompressLen(payload))
+			slot.RollupCostData = RollupCostData{Zeroes: zeroes, Ones: ones, FastLzSize: fastLzSize}
 		}
 		p = dataPos + dataLen
 
@@ -477,7 +478,7 @@ func (ctx *TxParseContext) parseTransactionBody(payload []byte, pos, p0 int, slo
 	}
 	{
 		// full tx contents count towards rollup data gas, not just tx data
-		var zeroes, ones uint64
+		var zeroes, ones, fastLzSize uint64
 		for _, byt := range payload {
 			if byt == 0 {
 				zeroes++
@@ -485,9 +486,8 @@ func (ctx *TxParseContext) parseTransactionBody(payload []byte, pos, p0 int, slo
 				ones++
 			}
 		}
-		zeroesGas := zeroes * 4
-		onesGas := (ones + 68) * 16
-		slot.RollupDataGas = zeroesGas + onesGas
+		fastLzSize = uint64(fastlz.FlzCompressLen(payload))
+		slot.RollupCostData = RollupCostData{Zeroes: zeroes, Ones: ones, FastLzSize: fastLzSize}
 	}
 
 	p = dataPos + dataLen
@@ -1076,4 +1076,39 @@ func (al AccessList) StorageKeys() int {
 		sum += len(tuple.StorageKeys)
 	}
 	return sum
+}
+
+// RollupCostData is a transaction structure that caches data for quickly computing the data
+// availability costs for the transaction.
+type RollupCostData struct {
+	Zeroes, Ones uint64
+	FastLzSize   uint64
+}
+
+type L1CostFn func(tx *TxSlot) *uint256.Int
+
+// Removes everything but the payload body from blob tx and prepends 0x3 at the beginning - no copy
+// Doesn't change non-blob tx
+func UnwrapTxPlayloadRlp(blobTxRlp []byte) ([]byte, error) {
+	if blobTxRlp[0] != BlobTxType {
+		return blobTxRlp, nil
+	}
+	dataposPrev, _, isList, err := rlp.Prefix(blobTxRlp[1:], 0)
+	if err != nil || dataposPrev < 1 {
+		return nil, err
+	}
+	if !isList { // This is clearly not wrapped tx then
+		return blobTxRlp, nil
+	}
+
+	blobTxRlp = blobTxRlp[1:]
+	// Get to the wrapper list
+	datapos, datalen, err := rlp.List(blobTxRlp, dataposPrev)
+	if err != nil {
+		return nil, err
+	}
+	blobTxRlp = blobTxRlp[dataposPrev-1 : datapos+datalen] // Seek left an extra-bit
+	blobTxRlp[0] = 0x3
+	// Include the prefix part of the rlp
+	return blobTxRlp, nil
 }

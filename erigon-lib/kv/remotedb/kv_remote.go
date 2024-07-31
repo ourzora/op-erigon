@@ -24,12 +24,13 @@ import (
 	"runtime"
 	"unsafe"
 
-	"github.com/ledgerwatch/erigon-lib/kv/iter"
-	"github.com/ledgerwatch/erigon-lib/kv/order"
 	"github.com/ledgerwatch/log/v3"
 	"golang.org/x/sync/semaphore"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
+
+	"github.com/ledgerwatch/erigon-lib/kv/iter"
+	"github.com/ledgerwatch/erigon-lib/kv/order"
 
 	"github.com/ledgerwatch/erigon-lib/gointerfaces"
 	"github.com/ledgerwatch/erigon-lib/gointerfaces/grpcutil"
@@ -148,6 +149,10 @@ func (db *DB) EnsureVersionCompatibility() bool {
 
 func (db *DB) Close() {}
 
+func (db *DB) CHandle() unsafe.Pointer {
+	panic("CHandle not implemented")
+}
+
 func (db *DB) BeginRo(ctx context.Context) (txn kv.Tx, err error) {
 	select {
 	case <-ctx.Done():
@@ -156,7 +161,7 @@ func (db *DB) BeginRo(ctx context.Context) (txn kv.Tx, err error) {
 	}
 
 	if semErr := db.roTxsLimiter.Acquire(ctx, 1); semErr != nil {
-		return nil, semErr
+		return nil, fmt.Errorf("remotedb.DB.BeginRo: roTxsLimiter error %w", semErr)
 	}
 
 	defer func() {
@@ -180,7 +185,7 @@ func (db *DB) BeginRo(ctx context.Context) (txn kv.Tx, err error) {
 	return &tx{ctx: ctx, db: db, stream: stream, streamCancelFn: streamCancelFn, viewID: msg.ViewId, id: msg.TxId}, nil
 }
 func (db *DB) BeginTemporalRo(ctx context.Context) (kv.TemporalTx, error) {
-	t, err := db.BeginRo(ctx)
+	t, err := db.BeginRo(ctx) //nolint:gocritic
 	if err != nil {
 		return nil, err
 	}

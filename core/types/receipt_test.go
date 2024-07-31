@@ -25,11 +25,11 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/holiman/uint256"
 	"github.com/stretchr/testify/require"
 
-	"github.com/holiman/uint256"
+	"github.com/ledgerwatch/erigon-lib/chain"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
-
 	"github.com/ledgerwatch/erigon/common"
 	"github.com/ledgerwatch/erigon/common/u256"
 	"github.com/ledgerwatch/erigon/crypto"
@@ -38,6 +38,16 @@ import (
 )
 
 var (
+	ecotoneTestConfig = func() *chain.Config {
+		conf := *params.OptimismTestConfig // copy the config
+		conf.EcotoneTime = big.NewInt(0)
+		return &conf
+	}()
+	depNonce1     = uint64(7)
+	depNonce2     = uint64(8)
+	blockNumber   = big.NewInt(5)
+	blockTime     = uint64(10)
+	blockHash     = libcommon.BytesToHash([]byte{0x03, 0x14})
 	legacyReceipt = &Receipt{
 		Status:            ReceiptStatusFailed,
 		CumulativeGasUsed: 1,
@@ -145,9 +155,24 @@ var (
 		},
 		Type: DepositTxType,
 	}
+	basefee = uint256.NewInt(1000 * 1e6)
+	scalar  = uint256.NewInt(7 * 1e6)
+
+	blobBaseFee       = big.NewInt(10 * 1e6)
+	baseFeeScalar     = uint64(2)
+	blobBaseFeeScalar = uint64(3)
+
+	// below are the expected cost func outcomes for the above parameter settings on the emptyTx
+	// which is defined in transaction_test.go
+	bedrockFee = uint256.NewInt(11326000000000)
+	ecotoneFee = uint256.NewInt(960900) // (480/16)*(2*16*1000 + 3*10) == 960900
+
+	bedrockGas = uint256.NewInt(1618)
+	ecotoneGas = uint256.NewInt(480)
 )
 
 func TestDecodeEmptyTypedReceipt(t *testing.T) {
+	t.Parallel()
 	input := []byte{0x80}
 	var r Receipt
 	err := rlp.DecodeBytes(input, &r)
@@ -157,6 +182,7 @@ func TestDecodeEmptyTypedReceipt(t *testing.T) {
 }
 
 func TestLegacyReceiptDecoding(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		encode func(*Receipt) ([]byte, error)
@@ -191,7 +217,9 @@ func TestLegacyReceiptDecoding(t *testing.T) {
 	receipt.Bloom = CreateBloom(Receipts{receipt})
 
 	for _, tc := range tests {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			enc, err := tc.encode(receipt)
 			if err != nil {
 				t.Fatalf("Error encoding receipt: %v", err)
@@ -237,8 +265,45 @@ func encodeAsStoredReceiptRLP(want *Receipt) ([]byte, error) {
 	return rlp.EncodeToBytes(stored)
 }
 
+func diffDerivedFields(t *testing.T, receipts, derivedReceipts Receipts) {
+	logIndex := uint(0)
+	for i := range receipts {
+		require.EqualValuesf(t, receipts[i].Type, derivedReceipts[i].Type, "receipts[%d].Type", i)
+		require.EqualValuesf(t, receipts[i].TxHash, derivedReceipts[i].TxHash, "receipts[%d].TxHash", i)
+		require.EqualValuesf(t, receipts[i].BlockHash, derivedReceipts[i].BlockHash, "receipts[%d].BlockHash", i)
+		require.EqualValuesf(t, receipts[i].BlockNumber, derivedReceipts[i].BlockNumber, "receipts[%d].BlockNumber", i)
+		require.EqualValuesf(t, receipts[i].TransactionIndex, derivedReceipts[i].TransactionIndex, "receipts[%d].TransactionIndex", i)
+		require.EqualValuesf(t, receipts[i].ContractAddress, derivedReceipts[i].ContractAddress, "receipts[%d].ContractAddress", i)
+		require.EqualValuesf(t, receipts[i].GasUsed, derivedReceipts[i].GasUsed, "receipts[%d].GasUsed", i)
+
+		require.EqualValuesf(t, len(receipts[i].Logs), len(derivedReceipts[i].Logs), "receipts[%d].Logs", i)
+		for j := range receipts[i].Logs {
+			require.EqualValuesf(t, receipts[i].Logs[j].BlockNumber, derivedReceipts[i].Logs[j].BlockNumber, "receipts[%d].Logs[%d].BlockNumber", i, j)
+			require.EqualValuesf(t, receipts[i].Logs[j].BlockHash, derivedReceipts[i].Logs[j].BlockHash, "receipts[%d].Logs[%d].BlockHash", i, j)
+			require.EqualValuesf(t, receipts[i].Logs[j].TxHash, derivedReceipts[i].Logs[j].TxHash, "receipts[%d].Logs[%d].TxHash", i, j)
+			require.EqualValuesf(t, receipts[i].Logs[j].TxIndex, derivedReceipts[i].Logs[j].TxIndex, "receipts[%d].Logs[%d].TxIndex", i, j)
+			require.EqualValuesf(t, receipts[i].Logs[j].Index, derivedReceipts[i].Logs[j].Index, "receipts[%d].Logs[%d].Index", i, j)
+			if receipts[i].Logs[j].Index != logIndex {
+				t.Errorf("receipts[%d].Logs[%d].Index = %d, want %d", i, j, receipts[i].Logs[j].Index, logIndex)
+			}
+			logIndex++
+		}
+
+		require.EqualValuesf(t, receipts[i].L1GasPrice, derivedReceipts[i].L1GasPrice, "receipts[%d].L1GasPrice", i)
+		require.EqualValuesf(t, receipts[i].L1GasUsed, derivedReceipts[i].L1GasUsed, "receipts[%d].L1GasUsed", i)
+		require.EqualValuesf(t, receipts[i].L1Fee, derivedReceipts[i].L1Fee, "receipts[%d].L1fee", i)
+		if receipts[i].FeeScalar != nil && derivedReceipts[i].FeeScalar != nil { // cmp
+			require.Truef(t, receipts[i].FeeScalar.Cmp(derivedReceipts[i].FeeScalar) == 0, "receipts[%d].FeeScalar", i)
+		}
+		require.EqualValuesf(t, receipts[i].L1BlobBaseFee, derivedReceipts[i].L1BlobBaseFee, "receipts[%d].L1BlobBaseFee", i)
+		require.EqualValuesf(t, receipts[i].L1BaseFeeScalar, derivedReceipts[i].L1BaseFeeScalar, "receipts[%d].L1BaseFeeScalar", i)
+		require.EqualValuesf(t, receipts[i].L1BlobBaseFeeScalar, derivedReceipts[i].L1BlobBaseFeeScalar, "receipts[%d].L1BlobBaseFeeScalar", i)
+	}
+}
+
 // Tests that receipt data can be correctly derived from the contextual infos
 func TestDeriveFields(t *testing.T) {
+	t.Parallel()
 	// Create a few transactions to have receipts for
 	to2 := libcommon.HexToAddress("0x2")
 	to3 := libcommon.HexToAddress("0x3")
@@ -290,50 +355,59 @@ func TestDeriveFields(t *testing.T) {
 			Status:            ReceiptStatusFailed,
 			CumulativeGasUsed: 1,
 			Logs: []*Log{
-				{Address: libcommon.BytesToAddress([]byte{0x11})},
-				{Address: libcommon.BytesToAddress([]byte{0x01, 0x11})},
+				{Address: libcommon.BytesToAddress([]byte{0x11}), BlockNumber: blockNumber.Uint64(), BlockHash: blockHash, TxHash: txs[0].Hash(), TxIndex: 0, Index: 0},
+				{Address: libcommon.BytesToAddress([]byte{0x01, 0x11}), BlockNumber: blockNumber.Uint64(), BlockHash: blockHash, TxHash: txs[0].Hash(), TxIndex: 0, Index: 1},
 			},
-			TxHash:          txs[0].Hash(),
-			ContractAddress: libcommon.BytesToAddress([]byte{0x01, 0x11, 0x11}),
-			GasUsed:         1,
+			TxHash:           txs[0].Hash(),
+			ContractAddress:  libcommon.HexToAddress("0x5a443704dd4b594b382c22a083e2bd3090a6fef3"),
+			GasUsed:          1,
+			BlockHash:        blockHash,
+			BlockNumber:      blockNumber,
+			TransactionIndex: 0,
 		},
 		&Receipt{
 			PostState:         libcommon.Hash{2}.Bytes(),
 			CumulativeGasUsed: 3,
 			Logs: []*Log{
-				{Address: libcommon.BytesToAddress([]byte{0x22})},
-				{Address: libcommon.BytesToAddress([]byte{0x02, 0x22})},
+				{Address: libcommon.BytesToAddress([]byte{0x22}), BlockNumber: blockNumber.Uint64(), BlockHash: blockHash, TxHash: txs[1].Hash(), TxIndex: 1, Index: 2},
+				{Address: libcommon.BytesToAddress([]byte{0x02, 0x22}), BlockNumber: blockNumber.Uint64(), BlockHash: blockHash, TxHash: txs[1].Hash(), TxIndex: 1, Index: 3},
 			},
-			TxHash:          txs[1].Hash(),
-			ContractAddress: libcommon.BytesToAddress([]byte{0x02, 0x22, 0x22}),
-			GasUsed:         2,
+			TxHash:           txs[1].Hash(),
+			ContractAddress:  libcommon.BytesToAddress(nil),
+			GasUsed:          2,
+			BlockHash:        blockHash,
+			BlockNumber:      blockNumber,
+			TransactionIndex: 1,
 		},
 		&Receipt{
 			Type:              AccessListTxType,
 			PostState:         libcommon.Hash{3}.Bytes(),
 			CumulativeGasUsed: 6,
 			Logs: []*Log{
-				{Address: libcommon.BytesToAddress([]byte{0x33})},
-				{Address: libcommon.BytesToAddress([]byte{0x03, 0x33})},
+				{Address: libcommon.BytesToAddress([]byte{0x33}), BlockNumber: blockNumber.Uint64(), BlockHash: blockHash, TxHash: txs[2].Hash(), TxIndex: 2, Index: 4},
+				{Address: libcommon.BytesToAddress([]byte{0x03, 0x33}), BlockNumber: blockNumber.Uint64(), BlockHash: blockHash, TxHash: txs[2].Hash(), TxIndex: 2, Index: 5},
 			},
-			TxHash:          txs[2].Hash(),
-			ContractAddress: libcommon.BytesToAddress([]byte{0x03, 0x33, 0x33}),
-			GasUsed:         3,
+			TxHash:           txs[2].Hash(),
+			ContractAddress:  libcommon.BytesToAddress(nil),
+			GasUsed:          3,
+			BlockHash:        blockHash,
+			BlockNumber:      blockNumber,
+			TransactionIndex: 2,
 		},
 		&Receipt{
 			Type:              DepositTxType,
 			PostState:         libcommon.Hash{3}.Bytes(),
 			CumulativeGasUsed: 10,
 			Logs: []*Log{
-				{Address: libcommon.BytesToAddress([]byte{0x33})},
-				{Address: libcommon.BytesToAddress([]byte{0x03, 0x33})},
+				{Address: libcommon.BytesToAddress([]byte{0x33}), BlockNumber: blockNumber.Uint64(), BlockHash: blockHash, TxHash: txs[3].Hash(), TxIndex: 3, Index: 6},
+				{Address: libcommon.BytesToAddress([]byte{0x03, 0x33}), BlockNumber: blockNumber.Uint64(), BlockHash: blockHash, TxHash: txs[3].Hash(), TxIndex: 3, Index: 7},
 			},
 			TxHash:                txs[3].Hash(),
-			ContractAddress:       libcommon.BytesToAddress([]byte{0x03, 0x33, 0x33}),
+			ContractAddress:       libcommon.HexToAddress("0x3bb898b4bbe24f68a4e9be46cfe72d1787fd74f4"),
 			GasUsed:               4,
-			BlockHash:             libcommon.BytesToHash([]byte{0x03, 0x14}),
-			BlockNumber:           big.NewInt(1),
-			TransactionIndex:      7,
+			BlockHash:             blockHash,
+			BlockNumber:           blockNumber,
+			TransactionIndex:      3,
 			DepositNonce:          &depNonce,
 			DepositReceiptVersion: nil,
 		},
@@ -346,28 +420,28 @@ func TestDeriveFields(t *testing.T) {
 					Address: libcommon.BytesToAddress([]byte{0x33}),
 					Topics:  []libcommon.Hash{libcommon.HexToHash("dead"), libcommon.HexToHash("beef")},
 					// derived fields:
-					BlockNumber: big.NewInt(1).Uint64(),
+					BlockNumber: blockNumber.Uint64(),
 					TxHash:      txs[4].Hash(),
+					BlockHash:   blockHash,
 					TxIndex:     4,
-					BlockHash:   libcommon.BytesToHash([]byte{0x03, 0x14}),
-					Index:       4,
+					Index:       8,
 				},
 				{
 					Address: libcommon.BytesToAddress([]byte{0x03, 0x33}),
 					Topics:  []libcommon.Hash{libcommon.HexToHash("dead"), libcommon.HexToHash("beef")},
 					// derived fields:
-					BlockNumber: big.NewInt(1).Uint64(),
+					BlockNumber: blockNumber.Uint64(),
 					TxHash:      txs[4].Hash(),
+					BlockHash:   blockHash,
 					TxIndex:     4,
-					BlockHash:   libcommon.BytesToHash([]byte{0x03, 0x14}),
-					Index:       5,
+					Index:       9,
 				},
 			},
 			TxHash:                txs[4].Hash(),
-			ContractAddress:       libcommon.HexToAddress("0x3bb898b4bbe24f68a4e9be46cfe72d1787fd74f4"),
+			ContractAddress:       libcommon.HexToAddress("0x117814af22cb83d8ad6e8489e9477d28265bc105"),
 			GasUsed:               5,
-			BlockHash:             libcommon.BytesToHash([]byte{0x03, 0x14}),
-			BlockNumber:           big.NewInt(1),
+			BlockHash:             blockHash,
+			BlockNumber:           blockNumber,
 			TransactionIndex:      4,
 			DepositNonce:          &depNonce2,
 			DepositReceiptVersion: &canyonDepositReceiptVersion,
@@ -383,65 +457,23 @@ func TestDeriveFields(t *testing.T) {
 		*receipts[4].DepositNonce,
 	}
 	// Clear all the computed fields and re-derive them
-	number := big.NewInt(1)
-	hash := libcommon.BytesToHash([]byte{0x03, 0x14})
+	number := blockNumber
+	hash := blockHash
 	time := uint64(0)
 
-	clearComputedFieldsOnReceipts(t, receipts)
-	if err := receipts.DeriveFields(params.TestChainConfig, hash, number.Uint64(), time, txs, []libcommon.Address{libcommon.BytesToAddress([]byte{0x0}), libcommon.BytesToAddress([]byte{0x0}), libcommon.BytesToAddress([]byte{0x0}), libcommon.BytesToAddress([]byte{0x0}), libcommon.BytesToAddress([]byte{0x0})}); err != nil {
+	derivedReceipts := clearComputedFieldsOnReceipts(t, receipts)
+	if err := derivedReceipts.DeriveFields(params.TestChainConfig, hash, number.Uint64(), time, txs, []libcommon.Address{libcommon.BytesToAddress([]byte{0x0}), libcommon.BytesToAddress([]byte{0x0}), libcommon.BytesToAddress([]byte{0x0}), libcommon.BytesToAddress([]byte{0x0}), libcommon.BytesToAddress([]byte{0x0})}); err != nil {
 		t.Fatalf("DeriveFields(...) = %v, want <nil>", err)
 	}
 	// Iterate over all the computed fields and check that they're correct
 	signer := MakeSigner(params.TestChainConfig, number.Uint64(), 0)
 
-	logIndex := uint(0)
+	diffDerivedFields(t, receipts, derivedReceipts)
 	for i := range receipts {
-		if receipts[i].Type != txs[i].Type() {
-			t.Errorf("receipts[%d].Type = %d, want %d", i, receipts[i].Type, txs[i].Type())
-		}
-		if receipts[i].TxHash != txs[i].Hash() {
-			t.Errorf("receipts[%d].TxHash = %s, want %s", i, receipts[i].TxHash.String(), txs[i].Hash().String())
-		}
-		if receipts[i].BlockHash != hash {
-			t.Errorf("receipts[%d].BlockHash = %s, want %s", i, receipts[i].BlockHash.String(), hash.String())
-		}
-		if receipts[i].BlockNumber.Cmp(number) != 0 {
-			t.Errorf("receipts[%c].BlockNumber = %s, want %s", i, receipts[i].BlockNumber.String(), number.String())
-		}
-		if receipts[i].TransactionIndex != uint(i) {
-			t.Errorf("receipts[%d].TransactionIndex = %d, want %d", i, receipts[i].TransactionIndex, i)
-		}
-		if receipts[i].GasUsed != txs[i].GetGas() {
-			t.Errorf("receipts[%d].GasUsed = %d, want %d", i, receipts[i].GasUsed, txs[i].GetGas())
-		}
-		if txs[i].GetTo() != nil && receipts[i].ContractAddress != (libcommon.Address{}) {
-			t.Errorf("receipts[%d].ContractAddress = %s, want %s", i, receipts[i].ContractAddress.String(), (libcommon.Address{}).String())
-		}
 		from, _ := txs[i].Sender(*signer)
 		contractAddress := crypto.CreateAddress(from, nonces[i])
 		if txs[i].GetTo() == nil && receipts[i].ContractAddress != contractAddress {
 			t.Errorf("receipts[%d].ContractAddress = %s, want %s", i, receipts[i].ContractAddress.String(), contractAddress.String())
-		}
-		for j := range receipts[i].Logs {
-			if receipts[i].Logs[j].BlockNumber != number.Uint64() {
-				t.Errorf("receipts[%d].Logs[%d].BlockNumber = %d, want %d", i, j, receipts[i].Logs[j].BlockNumber, number.Uint64())
-			}
-			if receipts[i].Logs[j].BlockHash != hash {
-				t.Errorf("receipts[%d].Logs[%d].BlockHash = %s, want %s", i, j, receipts[i].Logs[j].BlockHash.String(), hash.String())
-			}
-			if receipts[i].Logs[j].TxHash != txs[i].Hash() {
-				t.Errorf("receipts[%d].Logs[%d].TxHash = %s, want %s", i, j, receipts[i].Logs[j].TxHash.String(), txs[i].Hash().String())
-			}
-			if receipts[i].Logs[j].TxHash != txs[i].Hash() {
-				t.Errorf("receipts[%d].Logs[%d].TxHash = %s, want %s", i, j, receipts[i].Logs[j].TxHash.String(), txs[i].Hash().String())
-			}
-			if receipts[i].Logs[j].TxIndex != uint(i) {
-				t.Errorf("receipts[%d].Logs[%d].TransactionIndex = %d, want %d", i, j, receipts[i].Logs[j].TxIndex, i)
-			}
-			if receipts[i].Logs[j].Index != logIndex {
-				t.Errorf("receipts[%d].Logs[%d].Index = %d, want %d", i, j, receipts[i].Logs[j].Index, logIndex)
-			}
-			logIndex++
 		}
 	}
 }
@@ -449,6 +481,7 @@ func TestDeriveFields(t *testing.T) {
 // TestTypedReceiptEncodingDecoding reproduces a flaw that existed in the receipt
 // rlp decoder, which failed due to a shadowing error.
 func TestTypedReceiptEncodingDecoding(t *testing.T) {
+	t.Parallel()
 	var payload = common.FromHex("f9043eb9010c01f90108018262d4b9010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0b9010c01f901080182cd14b9010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0b9010d01f901090183013754b9010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0b9010d01f90109018301a194b9010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0")
 	check := func(bundle []*Receipt) {
 		t.Helper()
@@ -476,43 +509,54 @@ func TestTypedReceiptEncodingDecoding(t *testing.T) {
 	}
 }
 
-func clearComputedFieldsOnReceipts(t *testing.T, receipts Receipts) {
+func clearComputedFieldsOnReceipts(t *testing.T, receipts Receipts) Receipts {
 	t.Helper()
-
-	for _, receipt := range receipts {
-		clearComputedFieldsOnReceipt(t, receipt)
+	r := make(Receipts, len(receipts))
+	for i, receipt := range receipts {
+		r[i] = clearComputedFieldsOnReceipt(t, receipt)
 	}
+	return r
 }
 
-func clearComputedFieldsOnReceipt(t *testing.T, receipt *Receipt) {
+func clearComputedFieldsOnReceipt(t *testing.T, receipt *Receipt) *Receipt {
 	t.Helper()
+	cpy := *receipt
 
-	receipt.TxHash = libcommon.Hash{}
-	receipt.BlockHash = libcommon.Hash{}
-	receipt.BlockNumber = big.NewInt(math.MaxUint32)
-	receipt.TransactionIndex = math.MaxUint32
-	receipt.ContractAddress = libcommon.Address{}
-	receipt.GasUsed = 0
-
-	clearComputedFieldsOnLogs(t, receipt.Logs)
+	cpy.TxHash = libcommon.Hash{}
+	cpy.BlockHash = libcommon.Hash{}
+	cpy.BlockNumber = big.NewInt(math.MaxUint32)
+	cpy.TransactionIndex = math.MaxUint32
+	cpy.ContractAddress = libcommon.Address{}
+	cpy.GasUsed = 0
+	cpy.Logs = clearComputedFieldsOnLogs(t, receipt.Logs)
+	cpy.L1GasPrice = nil
+	cpy.L1GasUsed = nil
+	cpy.L1Fee = nil
+	cpy.FeeScalar = nil
+	cpy.L1BlobBaseFee = nil
+	cpy.L1BaseFeeScalar = nil
+	cpy.L1BlobBaseFeeScalar = nil
+	return &cpy
 }
 
-func clearComputedFieldsOnLogs(t *testing.T, logs []*Log) {
+func clearComputedFieldsOnLogs(t *testing.T, logs []*Log) []*Log {
 	t.Helper()
-
-	for _, log := range logs {
-		clearComputedFieldsOnLog(t, log)
+	cpys := make([]*Log, len(logs))
+	for i, log := range logs {
+		cpys[i] = clearComputedFieldsOnLog(t, log)
 	}
+	return cpys
 }
 
-func clearComputedFieldsOnLog(t *testing.T, log *Log) {
+func clearComputedFieldsOnLog(t *testing.T, log *Log) *Log {
 	t.Helper()
-
-	log.BlockNumber = math.MaxUint32
-	log.BlockHash = libcommon.Hash{}
-	log.TxHash = libcommon.Hash{}
-	log.TxIndex = math.MaxUint32
-	log.Index = math.MaxUint32
+	cpy := *log
+	cpy.BlockNumber = math.MaxUint32
+	cpy.BlockHash = libcommon.Hash{}
+	cpy.TxHash = libcommon.Hash{}
+	cpy.TxIndex = math.MaxUint32
+	cpy.Index = math.MaxUint32
+	return &cpy
 }
 
 func TestBedrockDepositReceiptUnchanged(t *testing.T) {
@@ -700,5 +744,153 @@ func TestReceiptJSON(t *testing.T) {
 				t.Errorf("%v: EncodeIndex differs after JSON marshal/unmarshal", test.name)
 			}
 		})
+	}
+}
+
+// This method is based on op-geth
+// https://github.com/ethereum-optimism/op-geth/commit/a290ca164a36c80a8d106d88bd482b6f82220bef
+func getOptimismTxReceipts(
+	l1AttributesPayload []byte,
+	l1GasPrice, l1GasUsed *uint256.Int, l1Fee *uint256.Int, feeScalar *big.Float, l1BlobBaseFee *big.Int, l1BaseFeeScalar, l1BlobBaseFeeScalar *uint64,
+) (Transactions, Receipts) {
+	//to4 := common.HexToAddress("0x4")
+	// Create a few transactions to have receipts for
+	txs := Transactions{
+		&DepositTx{
+			To:    nil, // contract creation
+			Value: uint256.NewInt(6),
+			Gas:   50,
+			Data:  l1AttributesPayload,
+		},
+		emptyTx,
+	}
+
+	// Create the corresponding receipts
+	receipts := Receipts{
+		&Receipt{
+			Type:              DepositTxType,
+			PostState:         libcommon.Hash{5}.Bytes(),
+			CumulativeGasUsed: 50,
+			Logs: []*Log{
+				{
+					Address: libcommon.BytesToAddress([]byte{0x33}),
+					// derived fields:
+					BlockNumber: blockNumber.Uint64(),
+					TxHash:      txs[0].Hash(),
+					TxIndex:     0,
+					BlockHash:   blockHash,
+					Index:       0,
+				},
+				{
+					Address: libcommon.BytesToAddress([]byte{0x03, 0x33}),
+					// derived fields:
+					BlockNumber: blockNumber.Uint64(),
+					TxHash:      txs[0].Hash(),
+					TxIndex:     0,
+					BlockHash:   blockHash,
+					Index:       1,
+				},
+			},
+			TxHash:           txs[0].Hash(),
+			ContractAddress:  libcommon.HexToAddress("0x3bb898b4bbe24f68a4e9be46cfe72d1787fd74f4"),
+			GasUsed:          50,
+			BlockHash:        blockHash,
+			BlockNumber:      blockNumber,
+			TransactionIndex: 0,
+			DepositNonce:     &depNonce1,
+		},
+		&Receipt{
+			Type:              LegacyTxType,
+			PostState:         libcommon.Hash{4}.Bytes(),
+			CumulativeGasUsed: 50,
+			Logs:              []*Log{},
+			// derived fields:
+			TxHash:              txs[1].Hash(),
+			GasUsed:             0,
+			BlockHash:           blockHash,
+			BlockNumber:         blockNumber,
+			TransactionIndex:    1,
+			L1GasPrice:          l1GasPrice.ToBig(),
+			L1GasUsed:           l1GasUsed.ToBig(),
+			L1Fee:               l1Fee.ToBig(),
+			FeeScalar:           feeScalar,
+			L1BlobBaseFee:       l1BlobBaseFee,
+			L1BaseFeeScalar:     l1BaseFeeScalar,
+			L1BlobBaseFeeScalar: l1BlobBaseFeeScalar,
+		},
+	}
+	return txs, receipts
+}
+
+// This method is based on op-geth
+// https://github.com/ethereum-optimism/op-geth/commit/a290ca164a36c80a8d106d88bd482b6f82220bef
+func TestDeriveOptimismTxReceipts(t *testing.T) {
+	checkBedrockReceipts := func(t *testing.T, receipts, derivedReceipts Receipts) {
+		diffDerivedFields(t, receipts, derivedReceipts)
+		// Check that we preserved the invariant: l1Fee = l1GasPrice * l1GasUsed * l1FeeScalar
+		// but with more difficult int math...
+		l2Rcpt := receipts[1]
+		l1GasCost := new(big.Int).Mul(l2Rcpt.L1GasPrice, l2Rcpt.L1GasUsed)
+		l1Fee := new(big.Float).Mul(new(big.Float).SetInt(l1GasCost), l2Rcpt.FeeScalar)
+		require.Equal(t, new(big.Float).SetInt(l2Rcpt.L1Fee), l1Fee)
+	}
+	checkEcotoneReceipts := func(t *testing.T, receipts, derivedReceipts Receipts) {
+		diffDerivedFields(t, receipts, derivedReceipts)
+
+		l2Rcpt := receipts[1]
+		require.Nilf(t, l2Rcpt.FeeScalar, "l2Rcpt.FeeScalar should be nil after ecotone")
+	}
+
+	tests := []struct {
+		name                string
+		cfg                 *chain.Config
+		isDeriveError       bool
+		payload             []byte
+		l1GasPrice          *uint256.Int
+		l1GasUsed           *uint256.Int
+		l1Fee               *uint256.Int
+		feeScalar           *big.Float
+		l1BlobBaseFee       *big.Int
+		l1BaseFeeScalar     *uint64
+		l1BlobBaseFeeScalar *uint64
+		fnCheckReceipts     func(t *testing.T, receipts, derivedReceipts Receipts)
+	}{
+		{
+			"bedrock receipt",
+			params.OptimismTestConfig, false,
+			libcommon.Hex2Bytes("015d8eb900000000000000000000000000000000000000000000000000000000000004d200000000000000000000000000000000000000000000000000000000000004d2000000000000000000000000000000000000000000000000000000003b9aca0000000000000000000000000000000000000000000000000000000000000004d200000000000000000000000000000000000000000000000000000000000004d200000000000000000000000000000000000000000000000000000000000004d2000000000000000000000000000000000000000000000000000000000000003200000000000000000000000000000000000000000000000000000000006acfc0015d8eb900000000000000000000000000000000000000000000000000000000000004d200000000000000000000000000000000000000000000000000000000000004d2000000000000000000000000000000000000000000000000000000003b9aca0000000000000000000000000000000000000000000000000000000000000004d200000000000000000000000000000000000000000000000000000000000004d200000000000000000000000000000000000000000000000000000000000004d2000000000000000000000000000000000000000000000000000000000000003200000000000000000000000000000000000000000000000000000000006acfc0"),
+			basefee, bedrockGas, bedrockFee, big.NewFloat(float64(scalar.Uint64() / 1e6)), nil, nil, nil, checkBedrockReceipts,
+		},
+		// Should get same result with the Ecotone config because it will assume this is "first ecotone block"
+		{
+			"bedrock receipt with ecotone config",
+			ecotoneTestConfig, false,
+			libcommon.Hex2Bytes("015d8eb900000000000000000000000000000000000000000000000000000000000004d200000000000000000000000000000000000000000000000000000000000004d2000000000000000000000000000000000000000000000000000000003b9aca0000000000000000000000000000000000000000000000000000000000000004d200000000000000000000000000000000000000000000000000000000000004d200000000000000000000000000000000000000000000000000000000000004d2000000000000000000000000000000000000000000000000000000000000003200000000000000000000000000000000000000000000000000000000006acfc0015d8eb900000000000000000000000000000000000000000000000000000000000004d200000000000000000000000000000000000000000000000000000000000004d2000000000000000000000000000000000000000000000000000000003b9aca0000000000000000000000000000000000000000000000000000000000000004d200000000000000000000000000000000000000000000000000000000000004d200000000000000000000000000000000000000000000000000000000000004d2000000000000000000000000000000000000000000000000000000000000003200000000000000000000000000000000000000000000000000000000006acfc0"),
+			basefee, bedrockGas, bedrockFee, big.NewFloat(float64(scalar.Uint64() / 1e6)), nil, nil, nil, checkBedrockReceipts,
+		},
+		{
+			"ecotone receipt",
+			ecotoneTestConfig, false,
+			libcommon.Hex2Bytes("440a5e20000000020000000300000000000004d200000000000004d200000000000004d2000000000000000000000000000000000000000000000000000000003b9aca00000000000000000000000000000000000000000000000000000000000098968000000000000000000000000000000000000000000000000000000000000004d200000000000000000000000000000000000000000000000000000000000004d2"),
+			basefee, ecotoneGas, ecotoneFee, nil, blobBaseFee, &baseFeeScalar, &blobBaseFeeScalar, checkEcotoneReceipts,
+		},
+		{
+			"ecotone receipt with optimism config",
+			params.OptimismTestConfig, true,
+			libcommon.Hex2Bytes("440a5e20000000020000000300000000000004d200000000000004d200000000000004d2000000000000000000000000000000000000000000000000000000003b9aca00000000000000000000000000000000000000000000000000000000000098968000000000000000000000000000000000000000000000000000000000000004d200000000000000000000000000000000000000000000000000000000000004d2"),
+			basefee, ecotoneGas, ecotoneFee, nil, blobBaseFee, &baseFeeScalar, &blobBaseFeeScalar, checkEcotoneReceipts,
+		},
+	}
+	for _, test := range tests {
+		txs, receipts := getOptimismTxReceipts(test.payload, test.l1GasPrice, test.l1GasUsed, test.l1Fee, test.feeScalar, test.l1BlobBaseFee, test.l1BaseFeeScalar, test.l1BlobBaseFeeScalar)
+		senders := []libcommon.Address{libcommon.HexToAddress("0x0"), libcommon.HexToAddress("0x0")}
+
+		// Re-derive receipts.
+		derivedReceipts := clearComputedFieldsOnReceipts(t, receipts)
+		err := derivedReceipts.DeriveFields(test.cfg, blockHash, blockNumber.Uint64(), blockTime, txs, senders)
+		require.NotEqualf(t, test.isDeriveError, err == nil, test.name)
+		if err == nil {
+			test.fnCheckReceipts(t, receipts, derivedReceipts)
+		}
 	}
 }

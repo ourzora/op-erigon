@@ -4,13 +4,15 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"github.com/ledgerwatch/erigon/params"
+
+	"github.com/ledgerwatch/erigon-lib/common/hexutil"
 
 	"github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/hexutility"
 	"github.com/ledgerwatch/erigon-lib/gointerfaces"
 	"github.com/ledgerwatch/erigon-lib/gointerfaces/execution"
 	types2 "github.com/ledgerwatch/erigon-lib/gointerfaces/types"
-	"github.com/ledgerwatch/erigon/common/hexutil"
 	"github.com/ledgerwatch/erigon/core/types"
 )
 
@@ -92,6 +94,14 @@ type GetPayloadResponse struct {
 	BlockValue            *hexutil.Big      `json:"blockValue"`
 	BlobsBundle           *BlobsBundleV1    `json:"blobsBundle"`
 	ShouldOverrideBuilder bool              `json:"shouldOverrideBuilder"`
+
+	// OP-Stack: Ecotone specific fields
+	ParentBeaconBlockRoot *common.Hash `json:"parentBeaconBlockRoot,omitempty"`
+}
+
+type SuperchainSignal struct {
+	Recommended params.ProtocolVersion `json:"recommended"`
+	Required    params.ProtocolVersion `json:"required"`
 }
 
 type StringifiedError struct{ err error }

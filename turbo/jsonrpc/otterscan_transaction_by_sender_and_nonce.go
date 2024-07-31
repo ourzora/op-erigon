@@ -173,6 +173,12 @@ func (api *OtterscanAPIImpl) GetTransactionBySenderAndNonce(ctx context.Context,
 	maxBlPrevChunk := uint64(0)
 
 	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
 		if k == nil || !bytes.HasPrefix(k, addr.Bytes()) {
 			// Check plain state
 			data, err := tx.GetOne(kv.PlainState, addr.Bytes())
@@ -270,10 +276,11 @@ func (api *OtterscanAPIImpl) findNonce(ctx context.Context, tx kv.Tx, addr commo
 	if err != nil {
 		return false, common.Hash{}, err
 	}
-	block, senders, err := api._blockReader.BlockWithSenders(ctx, tx, hash, blockNum)
+	block, err := api.blockWithSenders(ctx, tx, hash, blockNum)
 	if err != nil {
 		return false, common.Hash{}, err
 	}
+	senders := block.Body().SendersFromTxs()
 
 	txs := block.Transactions()
 	for i, s := range senders {
