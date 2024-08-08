@@ -2,7 +2,9 @@ package core_test
 
 import (
 	"context"
+	"encoding/json"
 	"math/big"
+	"os"
 	"testing"
 
 	"github.com/holiman/uint256"
@@ -34,7 +36,7 @@ func TestGenesisBlockHashes(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer tx.Rollback()
-		_, block, err := core.WriteGenesisBlock(tx, genesis, nil, nil, nil, nil, nil, nil, "", logger)
+		_, block, err := core.WriteGenesisBlock(tx, genesis, nil, nil, nil, nil, nil, nil, nil, "", logger)
 		require.NoError(t, err)
 		expect := params.GenesisHashByChainName(network)
 		require.NotNil(t, expect, network)
@@ -83,13 +85,13 @@ func TestCommitGenesisIdempotency(t *testing.T) {
 	defer tx.Rollback()
 
 	genesis := core.GenesisBlockByChainName(networkname.MainnetChainName)
-	_, _, err = core.WriteGenesisBlock(tx, genesis, nil, nil, nil, nil, nil, nil, "", logger)
+	_, _, err = core.WriteGenesisBlock(tx, genesis, nil, nil, nil, nil, nil, nil, nil, "", logger)
 	require.NoError(t, err)
 	seq, err := tx.ReadSequence(kv.EthTx)
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), seq)
 
-	_, _, err = core.WriteGenesisBlock(tx, genesis, nil, nil, nil, nil, nil, nil, "", logger)
+	_, _, err = core.WriteGenesisBlock(tx, genesis, nil, nil, nil, nil, nil, nil, nil, "", logger)
 	require.NoError(t, err)
 	seq, err = tx.ReadSequence(kv.EthTx)
 	require.NoError(t, err)
@@ -140,4 +142,15 @@ func TestAllocConstructor(t *testing.T) {
 	storage1 := &uint256.Int{}
 	state.GetState(address, &key1, storage1)
 	assert.Equal(uint256.NewInt(0x01c9), storage1)
+}
+
+// See https://github.com/erigontech/erigon/pull/11264
+func TestDecodeBalance0(t *testing.T) {
+	genesisData, err := os.ReadFile("./genesis_test.json")
+	require.NoError(t, err)
+
+	genesis := &types.Genesis{}
+	err = json.Unmarshal(genesisData, genesis)
+	require.NoError(t, err)
+	_ = genesisData
 }
